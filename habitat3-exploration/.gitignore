@@ -1,0 +1,9 @@
+# Mode-specific secrets/overrides
+real/.env
+sim/.env
+
+# Scene datasets and generated outputs (bind-mounted into the container)
+sim/data/
+
+# Mission saves
+missions/

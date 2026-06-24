@@ -1,0 +1,65 @@
+id: habitat3-exploration
+name: Habitat 3.0 Exploration
+description: >-
+  Meta Habitat 3.0 (habitat-lab v0.3.x) simulator for VLM-aided room-exploration
+  research. Simulation runs in a GPU-enabled Docker container; the real/
+  compartment is a stub reserved for a future physical robot.
+robotType: explorer
+
+ros:
+  distro: jazzy
+
+defaultMission:
+  filename: mission_ui.yaml
+  yamlText: |
+    mission:
+      steps: []
+
+sim:
+  composeFile: sim/docker/docker-compose.yml
+  composeProject: habitat3-exploration
+  containerName: habitat3-sim
+  novncOrigin: http://localhost:6080
+  missionDir: /workspace/missions
+  rosInstallSetupPath: /opt/explorer_workspace/ros_workspace/install/setup.bash
+  startScriptPath: /workspace/scripts/start_sim.sh
+  recordingScriptPath: /workspace/scripts/start_sim.sh
+  tmuxSession: habitat
+  tmuxCaptureLines: 200
+  tmuxStopGraceSeconds: 10
+  autoStopOnDisconnect: true
+
+# Stub: no physical robot exists for this project yet. The compartment is
+# kept (per the Elytra project-folder contract) so a robot can be wired in
+# later without restructuring the package.
+real:
+  host: ""
+  port: 22
+  user: ""
+  missionDir: ~/missions
+  tmuxSession: habitat
+
+buttons:
+  - id: start-sim
+    label: Run Exploration Episode
+    description: Launch a Habitat 3.0 episode inside the sim container (tmux session "habitat")
+    kind: script
+    scriptKey: start
+  - id: stop-sim
+    label: Stop Episode
+    description: Stop the running Habitat episode
+    kind: script
+    stopAction: true
+  - id: smoke-test
+    label: GPU Smoke Test
+    description: Load a test scene, step a random agent, report renderer + FPS
+    kind: script
+    scriptPath: /workspace/scripts/run_smoke_test.sh
+  - id: movement-demo
+    label: Movement Demo
+    description: >-
+      Send a fixed ROS action sequence (forward 1, turn left 90°, forward 2,
+      turn right 90°, back 2). Requires a running exploration episode.
+    kind: script
+    scriptPath: /workspace/scripts/run_movement_demo.sh
+    oneshot: true

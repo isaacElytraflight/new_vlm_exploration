@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""ROS 2 bridge: /image_data, /depth_data, /movement/discrete_move."""
+
+from __future__ import annotations
+
+import os
+from typing import Optional
+
+import rclpy
+from explorer_msgs.action import DiscreteMove
+from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Image
+from std_msgs.msg import Header
+
+from explorer_bridge.driver_protocol import ExplorerDriver
+from explorer_bridge.habitat_driver import HabitatDriver
+from explorer_bridge.hardware_driver import HardwareDriver
+from explorer_bridge.image_utils import depth_array_to_image, rgb_array_to_image, write_jpeg_frame
+from explorer_bridge.mock_driver import MockHabitatDriver
+
+DIRECTION_TO_ACTION = {
+    DiscreteMove.Goal.FORWARD: "move_forward",
+    DiscreteMove.Goal.BACKWARD: "move_backward",
+    DiscreteMove.Goal.TURN_LEFT: "turn_left",
+    DiscreteMove.Goal.TURN_RIGHT: "turn_right",
+}
+
+VALID_DIRECTIONS = set(DIRECTION_TO_ACTION.keys())
+DEFAULT_LIVE_FRAME = "/tmp/habitat_live/frame.jpg"
+
+
+def create_driver(backend: str, socket_path: str) -> ExplorerDriver:
+    backend = backend.strip().lower()
+    if backend == "habitat":
+        return HabitatDriver(socket_path)
+    if backend == "hardware":
+        return HardwareDriver()
+    if backend == "mock":
+        return MockHabitatDriver()
+    raise ValueError(f"unknown driver_backend={backend!r}")
+
+
+class ExplorerBridgeNode(Node):
+    def __init__(self, driver: Optional[ExplorerDriver] = None) -> None:
+        super().__init__("explorer_bridge_node")
+        self.declare_parameter("driver_backend", "habitat")
+        self.declare_parameter("habitat_socket_path", "/tmp/habitat_engine.sock")
+        self.declare_parameter("publish_hz", float(os.environ.get("HABITAT_VIEW_FPS", "15")))
+        self.declare_parameter("live_frame_path", DEFAULT_LIVE_FRAME)
+        self.declare_parameter("rgb_topic", "/image_data")
+        self.declare_parameter("depth_topic", "/depth_data")
+        self.declare_parameter("action_name", "/movement/discrete_move")
+
+        backend = self.get_parameter("driver_backend").get_parameter_value().string_value
+        socket_path = self.get_parameter("habitat_socket_path").get_parameter_value().string_value
+        self._driver = driver if driver is not None else create_driver(backend, socket_path)
+
+        rgb_topic = self.get_parameter("rgb_topic").get_parameter_value().string_value
+        depth_topic = self.get_parameter("depth_topic").get_parameter_value().string_value
+        action_name = self.get_parameter("action_name").get_parameter_value().string_value
+
+        self._live_frame = self.get_parameter("live_frame_path").get_parameter_value().string_value
+        publish_hz = max(0.1, self.get_parameter("publish_hz").get_parameter_value().double_value)
+
+        self._rgb_pub = self.create_publisher(Image, rgb_topic, qos_profile_sensor_data)
+        self._depth_pub = self.create_publisher(Image, depth_topic, qos_profile_sensor_data)
+
+        self._cb_group = ReentrantCallbackGroup()
+        self._action_server = ActionServer(
+            self,
+            DiscreteMove,
+            action_name,
+            execute_callback=self._execute_move,
+            goal_callback=self._goal_callback,
+            cancel_callback=self._cancel_callback,
+            callback_group=self._cb_group,
+        )
+
+        self._publish_timer = self.create_timer(
+            1.0 / publish_hz,
+            self._publish_sensor_data,
+            callback_group=self._cb_group,
+        )
+        self._driver_ready = True
+        self.get_logger().info(
+            f"Explorer bridge started (backend={backend}, publish={publish_hz:.1f} Hz)"
+        )
+
+    def _goal_callback(self, goal_request: DiscreteMove.Goal) -> GoalResponse:
+        if goal_request.direction not in VALID_DIRECTIONS:
+            self.get_logger().warn(f"Rejecting invalid direction={goal_request.direction}")
+            return GoalResponse.REJECT
+        if goal_request.steps == 0:
+            self.get_logger().warn("Rejecting goal with steps=0")
+            return GoalResponse.REJECT
+        return GoalResponse.ACCEPT
+
+    def _cancel_callback(self, goal_handle) -> CancelResponse:
+        return CancelResponse.ACCEPT
+
+    def _publish_sensor_data(self) -> None:
+        if not self._driver_ready:
+            return
+        try:
+            obs = self._driver.get_observations()
+        except Exception as exc:
+            self.get_logger().warn(f"get_observations failed: {exc}")
+            self._driver_ready = False
+            return
+
+        stamp = self.get_clock().now().to_msg()
+        header = Header(stamp=stamp, frame_id="camera")
+
+        self._rgb_pub.publish(rgb_array_to_image(obs.rgb, header=header, frame_id="camera"))
+        self._depth_pub.publish(
+            depth_array_to_image(obs.depth, header=header, frame_id="lidar_depth")
+        )
+
+        try:
+            os.makedirs(os.path.dirname(self._live_frame), exist_ok=True)
+            write_jpeg_frame(self._live_frame, obs.rgb)
+        except Exception as exc:
+            self.get_logger().debug(f"live frame write skipped: {exc}")
+
+    async def _execute_move(self, goal_handle):
+        goal = goal_handle.request
+        action = DIRECTION_TO_ACTION[goal.direction]
+        feedback = DiscreteMove.Feedback()
+        result = DiscreteMove.Result()
+
+        completed = 0
+        collided = False
+        for _ in range(goal.steps):
+            step_result = self._driver.step(action, 1)
+            if not step_result.success:
+                result.success = False
+                result.collided = step_result.collided
+                result.message = step_result.message
+                goal_handle.abort()
+                return result
+            completed += step_result.steps_completed
+            collided = collided or step_result.collided
+            feedback.steps_completed = completed
+            goal_handle.publish_feedback(feedback)
+
+        result.success = True
+        result.collided = collided
+        result.message = "OK"
+        goal_handle.succeed()
+        return result
+
+    def destroy_node(self) -> bool:
+        try:
+            self._driver.shutdown()
+        except Exception:
+            pass
+        return super().destroy_node()
+
+
+def main(args=None) -> None:
+    rclpy.init(args=args)
+    node = ExplorerBridgeNode()
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
+    try:
+        executor.spin()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,50 @@
+name: habitat3-exploration
+
+services:
+  # elytra-bridge's backend addresses the service as "sim" (it runs
+  # `docker compose ... build sim` / `up sim`), so the name is load-bearing.
+  sim:
+    build:
+      context: ../..
+      dockerfile: sim/docker/Dockerfile
+    image: habitat3-exploration:latest
+    container_name: habitat3-sim
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: graphics,compute,utility
+      DISPLAY: ":1"
+      # --- WSL2 GPU rendering path -------------------------------------------
+      # Docker Desktop's WSL2 VM has no native NVIDIA EGL stack; OpenGL reaches
+      # the GPU through Mesa's d3d12 driver -> libdxcore -> /dev/dxg -> host
+      # Windows driver. These four lines select that path explicitly.
+      LD_LIBRARY_PATH: /usr/lib/wsl/lib
+      __EGL_VENDOR_LIBRARY_FILENAMES: /usr/share/glvnd/egl_vendor.d/50_mesa.json
+      GALLIUM_DRIVER: d3d12
+      MESA_D3D12_DEFAULT_ADAPTER_NAME: NVIDIA
+      # -1 = skip CUDA<->EGL device matching (impossible via d3d12); habitat
+      # then renders on the first EGL device, i.e. the GPU above.
+      HABITAT_GPU_DEVICE_ID: "-1"
+      HABITAT_VIEW_FPS: "15"
+    devices:
+      - /dev/dxg
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+        limits:
+          # Guard rail against WSL2 VM ballooning; raise if large scene
+          # datasets (e.g. HM3D) need more headroom.
+          memory: 12g
+    shm_size: 2g
+    ports:
+      - "6080:6080"   # noVNC viewer (project.yaml novncOrigin)
+    volumes:
+      - /usr/lib/wsl:/usr/lib/wsl:ro       # WSL GPU userspace libs (dxcore/d3d12)
+      - ../data:/data                      # scene datasets, persisted on host
+      - ../scripts:/workspace/scripts      # live-editable scripts
+      - ../../ros_workspace/src:/opt/explorer_workspace/ros_workspace/src
+      - ../../missions:/workspace/missions # elytra-bridge mission saves
+    tty: true
+    restart: unless-stopped

@@ -1,0 +1,29 @@
+# elytra-bridge is its own independent git repository
+/elytra-bridge/
+
+# Habitat scene datasets / generated outputs (large, bind-mounted)
+habitat3-exploration/sim/data/
+
+# Mode-specific secrets/overrides
+habitat3-exploration/real/.env
+habitat3-exploration/sim/.env
+
+# Mission saves
+habitat3-exploration/missions/
+
+# colcon build artifacts
+habitat3-exploration/ros_workspace/build/
+habitat3-exploration/ros_workspace/install/
+habitat3-exploration/ros_workspace/log/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Node
+node_modules/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
