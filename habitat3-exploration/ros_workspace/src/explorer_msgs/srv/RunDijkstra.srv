@@ -1,0 +1,7 @@
+explorer_msgs/Vertex start
+explorer_msgs/Vertex goal
+float64 snap_tolerance_m
+---
+nav_msgs/Path path
+bool success
+string message

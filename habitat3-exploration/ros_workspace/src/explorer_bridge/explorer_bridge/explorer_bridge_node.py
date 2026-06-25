@@ -6,8 +6,12 @@ from __future__ import annotations
 import os
 from typing import Optional
 
+import math
+
 import rclpy
 from explorer_msgs.action import DiscreteMove
+from geometry_msgs.msg import Quaternion, TransformStamped, Twist
+from nav_msgs.msg import Odometry
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -15,6 +19,7 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 from std_msgs.msg import Header
+from tf2_ros import TransformBroadcaster
 
 from explorer_bridge.driver_protocol import ExplorerDriver
 from explorer_bridge.habitat_driver import HabitatDriver
@@ -54,6 +59,10 @@ class ExplorerBridgeNode(Node):
         self.declare_parameter("rgb_topic", "/image_data")
         self.declare_parameter("depth_topic", "/depth_data")
         self.declare_parameter("action_name", "/movement/discrete_move")
+        self.declare_parameter("publish_odom", True)
+        self.declare_parameter("map_frame", "map")
+        self.declare_parameter("base_frame", "base_link")
+        self.declare_parameter("odom_topic", "/odom")
 
         backend = self.get_parameter("driver_backend").get_parameter_value().string_value
         socket_path = self.get_parameter("habitat_socket_path").get_parameter_value().string_value
@@ -85,6 +94,20 @@ class ExplorerBridgeNode(Node):
             self._publish_sensor_data,
             callback_group=self._cb_group,
         )
+
+        self._map_frame = self.get_parameter("map_frame").get_parameter_value().string_value
+        self._base_frame = self.get_parameter("base_frame").get_parameter_value().string_value
+        publish_odom = self.get_parameter("publish_odom").get_parameter_value().bool_value
+        if publish_odom:
+            odom_topic = self.get_parameter("odom_topic").get_parameter_value().string_value
+            self._odom_pub = self.create_publisher(Odometry, odom_topic, 10)
+            self._tf_broadcaster = TransformBroadcaster(self)
+            self._odom_timer = self.create_timer(
+                0.1,
+                self._publish_odom_tf,
+                callback_group=self._cb_group,
+            )
+
         self._driver_ready = True
         self.get_logger().info(
             f"Explorer bridge started (backend={backend}, publish={publish_hz:.1f} Hz)"
@@ -125,6 +148,41 @@ class ExplorerBridgeNode(Node):
             write_jpeg_frame(self._live_frame, obs.rgb)
         except Exception as exc:
             self.get_logger().debug(f"live frame write skipped: {exc}")
+
+    @staticmethod
+    def _yaw_to_quaternion(yaw_rad: float) -> Quaternion:
+        q = Quaternion()
+        q.z = math.sin(yaw_rad / 2.0)
+        q.w = math.cos(yaw_rad / 2.0)
+        return q
+
+    def _publish_odom_tf(self) -> None:
+        if not self._driver_ready:
+            return
+        try:
+            pose = self._driver.get_pose()
+        except Exception as exc:
+            self.get_logger().debug(f"get_pose failed: {exc}")
+            return
+
+        stamp = self.get_clock().now().to_msg()
+        odom = Odometry()
+        odom.header.stamp = stamp
+        odom.header.frame_id = self._map_frame
+        odom.child_frame_id = self._base_frame
+        odom.pose.pose.position.x = pose.x
+        odom.pose.pose.position.y = pose.y
+        odom.pose.pose.orientation = self._yaw_to_quaternion(pose.yaw_rad)
+        self._odom_pub.publish(odom)
+
+        tf_msg = TransformStamped()
+        tf_msg.header.stamp = stamp
+        tf_msg.header.frame_id = self._map_frame
+        tf_msg.child_frame_id = self._base_frame
+        tf_msg.transform.translation.x = pose.x
+        tf_msg.transform.translation.y = pose.y
+        tf_msg.transform.rotation = odom.pose.pose.orientation
+        self._tf_broadcaster.sendTransform(tf_msg)
 
     async def _execute_move(self, goal_handle):
         goal = goal_handle.request

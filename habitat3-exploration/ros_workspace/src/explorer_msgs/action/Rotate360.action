@@ -1,0 +1,10 @@
+# Goal (empty trigger)
+---
+# Result
+bool success
+string message
+sensor_msgs/CompressedImage[] cached_images
+float64[] cached_orientations
+---
+# Feedback
+string status

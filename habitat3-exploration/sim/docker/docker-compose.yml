@@ -9,9 +9,14 @@ services:
       dockerfile: sim/docker/Dockerfile
     image: habitat3-exploration:latest
     container_name: habitat3-sim
+    env_file:
+      - path: ../.env
+        required: false
     environment:
       NVIDIA_DRIVER_CAPABILITIES: graphics,compute,utility
       DISPLAY: ":1"
+      # VLM frontier selection (set in sim/.env or Elytra backend .env)
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       # --- WSL2 GPU rendering path -------------------------------------------
       # Docker Desktop's WSL2 VM has no native NVIDIA EGL stack; OpenGL reaches
       # the GPU through Mesa's d3d12 driver -> libdxcore -> /dev/dxg -> host

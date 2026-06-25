@@ -69,4 +69,4 @@ fi
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/bin:/opt/ros/jazzy/bin
 source /opt/ros/jazzy/setup.bash
 source /opt/explorer_workspace/ros_workspace/install/setup.bash
-exec ros2 launch explorer_bridge habitat_sim.launch.py driver_backend:=habitat
+exec ros2 launch explorer_mission exploration.launch.py driver_backend:=habitat

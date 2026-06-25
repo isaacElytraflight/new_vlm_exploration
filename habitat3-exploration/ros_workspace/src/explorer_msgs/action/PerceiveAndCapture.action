@@ -1,0 +1,10 @@
+# Goal
+explorer_msgs/FrontierArray frontiers
+---
+# Result
+bool success
+string message
+---
+# Feedback
+string status
+uint8 current_frontier_index

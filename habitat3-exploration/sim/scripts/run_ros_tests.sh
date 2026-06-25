@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run explorer_bridge unit tests inside the sim container (or any Jazzy env).
+# Run explorer ROS unit tests (gtest + pytest) inside the sim container or Jazzy env.
 set -eo pipefail
 
 WS="${EXPLORER_ROS_WS:-/opt/explorer_workspace/ros_workspace}"
@@ -10,10 +10,14 @@ export PYTHON_EXECUTABLE=/usr/bin/python3
 source /opt/ros/jazzy/setup.bash
 cd "$WS"
 
-# Bind-mount replaces image install/ — rebuild with system Python (not conda).
 rm -rf build
 colcon build --symlink-install \
-  --packages-select explorer_msgs explorer_bridge \
+  --packages-select explorer_msgs explorer_bridge explorer_mission \
   --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
 source install/setup.bash
+
+colcon test --packages-select explorer_mission --event-handlers console_direct+
+colcon test-result --verbose
+
 pytest src/explorer_bridge/test/ -v
+pytest src/explorer_mission/test_py/ -v

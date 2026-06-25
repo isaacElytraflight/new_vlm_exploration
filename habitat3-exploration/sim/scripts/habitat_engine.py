@@ -3,6 +3,8 @@
 
 Commands (one JSON object per line):
   {"cmd": "get_obs"}
+  {"cmd": "get_pose"}
+  {"cmd": "get_map"}
   {"cmd": "step", "action": "move_forward", "count": 1}
   {"cmd": "reset"}
   {"cmd": "shutdown"}
@@ -19,7 +21,15 @@ import sys
 from typing import Any, Dict, Optional, Tuple
 
 import habitat_sim
+import magnum as mn
 import numpy as np
+
+from explored_map import compute_revealed_grid
+
+MAP_METERS_PER_PIXEL = float(os.environ.get("HABITAT_MAP_RESOLUTION", "0.05"))
+# Sensor range for the incremental "explored" map reveal. Frontiers appear at
+# this boundary, so it must be > the frontier filter min radius (1.0 m).
+SENSOR_RANGE_M = float(os.environ.get("HABITAT_SENSOR_RANGE_M", "4.0"))
 
 SCENE = os.environ.get(
     "HABITAT_SCENE",
@@ -89,6 +99,8 @@ class HabitatEngine:
         self._last_obs: Dict[str, Any] = self._sim.get_sensor_observations()
         if self._last_obs:
             self._collided = False
+        # Accumulated mask of navmesh cells the agent has observed so far.
+        self._explored: Optional[np.ndarray] = None
 
     def close(self) -> None:
         self._sim.close()
@@ -97,6 +109,7 @@ class HabitatEngine:
         self._sim.reset()
         self._last_obs = self._sim.get_sensor_observations()
         self._collided = False
+        self._explored = None
 
     def get_obs(self) -> Tuple[np.ndarray, np.ndarray, bool]:
         rgb = self._last_obs.get("rgb")
@@ -123,6 +136,52 @@ class HabitatEngine:
             completed += 1
         return collided, completed
 
+    def get_pose(self) -> Tuple[float, float, float]:
+        """Return (x, y, yaw_rad) in a 2D map frame (habitat X-Z plane)."""
+        state = self._sim.get_agent(0).get_state()
+        pos = state.position
+        rot = state.rotation
+        if not isinstance(rot, mn.Quaternion):
+            # habitat returns a numpy-quaternion (w, x, y, z); magnum's
+            # constructor needs an explicit (Vector3 xyz, scalar w).
+            rot = mn.Quaternion(
+                mn.Vector3(float(rot.x), float(rot.y), float(rot.z)), float(rot.w)
+            )
+        forward = rot.transform_vector_normalized(mn.Vector3(0.0, 0.0, -1.0))
+        yaw = float(np.arctan2(forward.x, -forward.z))
+        return float(pos[0]), float(pos[2]), yaw
+
+    def get_map(self) -> Tuple[np.ndarray, float, float, float]:
+        """Return (grid int8 HxW, resolution, origin_x, origin_y).
+
+        The grid is an *incrementally revealed* occupancy map: FREE(0) /
+        OCCUPIED(100) for cells the agent has observed, UNKNOWN(-1) otherwise.
+        This is what makes frontier detection possible (vs. the raw navmesh,
+        which is fully known and therefore frontier-free)."""
+        pf = self._sim.pathfinder
+        if not pf.is_loaded:
+            raise RuntimeError("pathfinder not loaded")
+        pos = self._sim.get_agent(0).get_state().position
+        # get_topdown_view needs the vertical slice height; use the agent's
+        # current floor height so the navmesh slice matches where it stands.
+        height = float(pos[1])
+        top_down = pf.get_topdown_view(MAP_METERS_PER_PIXEL, height)
+        navigable = np.asarray(top_down, dtype=bool)
+
+        lower, _upper = pf.get_bounds()
+        origin_x = float(lower[0])
+        origin_y = float(lower[2])
+        # Column = world x, row = world z (consistent with the bridge's TF /
+        # odom and the C++ pixelToWorld in frontier_detection).
+        agent_col = (float(pos[0]) - origin_x) / MAP_METERS_PER_PIXEL
+        agent_row = (float(pos[2]) - origin_y) / MAP_METERS_PER_PIXEL
+        radius_px = SENSOR_RANGE_M / MAP_METERS_PER_PIXEL
+
+        grid, self._explored = compute_revealed_grid(
+            navigable, self._explored, agent_col, agent_row, radius_px
+        )
+        return grid, MAP_METERS_PER_PIXEL, origin_x, origin_y
+
 
 def _encode_obs_response(engine: HabitatEngine) -> Dict[str, Any]:
     rgb, depth, collided = engine.get_obs()
@@ -140,6 +199,25 @@ def _handle_request(engine: HabitatEngine, payload: Dict[str, Any]) -> Dict[str,
     cmd = payload.get("cmd")
     if cmd == "get_obs":
         return _encode_obs_response(engine)
+    if cmd == "get_pose":
+        try:
+            x, y, yaw = engine.get_pose()
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "x": x, "y": y, "yaw_rad": yaw}
+    if cmd == "get_map":
+        try:
+            grid, resolution, origin_x, origin_y = engine.get_map()
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        return {
+            "ok": True,
+            "grid_b64": base64.b64encode(grid.tobytes()).decode("ascii"),
+            "grid_shape": list(grid.shape),
+            "resolution": resolution,
+            "origin_x": origin_x,
+            "origin_y": origin_y,
+        }
     if cmd == "step":
         action = payload.get("action", "")
         count = int(payload.get("count", 1))

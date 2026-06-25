@@ -69,7 +69,8 @@ Open this folder in elytra-bridge via **File → Open Project** and connect in
   `/workspace/scripts/start_sim.sh` inside the `habitat` tmux session
 
 Copy `sim/.env.example` to `sim/.env` for local overrides (loaded only when
-connecting in sim mode).
+connecting in sim mode). Set `GEMINI_API_KEY` there for VLM frontier selection;
+it is injected into the container via docker-compose `env_file`.
 
 ## Notes
 

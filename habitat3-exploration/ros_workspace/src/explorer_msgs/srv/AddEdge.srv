@@ -1,0 +1,11 @@
+explorer_msgs/Vertex a
+explorer_msgs/Vertex b
+float64 weight_override
+float64 snap_tolerance_m
+---
+explorer_msgs/Vertex a_out
+explorer_msgs/Vertex b_out
+bool created_a
+bool created_b
+bool created_edge
+explorer_msgs/Graph graph

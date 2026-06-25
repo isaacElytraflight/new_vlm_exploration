@@ -23,11 +23,32 @@ class StepResult:
     message: str = ""
 
 
+@dataclass
+class PoseData:
+    x: float
+    y: float
+    yaw_rad: float
+
+
+@dataclass
+class MapData:
+    grid: np.ndarray  # int8 HxW
+    resolution: float
+    origin_x: float
+    origin_y: float
+
+
 class ExplorerDriver(Protocol):
     def get_observations(self) -> ObservationData:
         ...
 
     def step(self, action: str, count: int = 1) -> StepResult:
+        ...
+
+    def get_pose(self) -> PoseData:
+        ...
+
+    def get_map(self) -> MapData:
         ...
 
     def reset(self) -> None:

@@ -6,6 +6,135 @@ Add a new dated section at the top when you work on this repo.
 
 ---
 
+## 2026-06-25 — Exploration episode E2E: blank screen, zero frontiers, 120 s delay
+
+### Goal
+Get **Run Exploration Episode** working end-to-end in Elytra: noVNC shows the
+scene, frontier detection finds valid targets in skokloster-castle, and the
+explore loop proceeds in seconds (not minutes).
+
+### What we fixed
+- **Launch crash → blank noVNC**: `exploration.launch.py` referenced
+  `maprender_node` and `vlm_node`, but hybrid `ament_cmake` +
+  `ament_cmake_python` never installed Python `console_scripts`. Added
+  `install(PROGRAMS … RENAME …)` in `CMakeLists.txt`; shebang on `vlm_node.py`.
+- **Habitat IPC**: `get_pose` failed on numpy-quaternion → explicit
+  `mn.Quaternion(Vector3(xyz), w)`; `get_map` needed `height` arg for
+  `get_topdown_view(mpp, height)`.
+- **Incremental explored map**: new `explored_map.py` — navmesh flood-fill from
+  agent (4 m sensor range) reveals FREE/OCCUPIED; unobserved cells stay
+  UNKNOWN(-1). Wired into `habitat_engine.get_map()`.
+- **~120 s action timeout**: `explore_node` blocked on action/service futures
+  without spinning → every `wait_for(120s)` hit full timeout. Background
+  `MultiThreadedExecutor` + thread-safe frontier state.
+- **`frontier_vlm_client_node` crash**: nested `spin_some` inside callback while
+  `main()` already spins → FATAL "already added to executor". Made
+  `viewsCb` event-driven; timeout via wall timer.
+- **`vlm_node` logger**: rclpy rejects printf-style `info("…%s", x)` → f-strings.
+- **Docker image** rebuilt twice so C++ fixes survive `compose down` / Shutdown.
+
+### Problems & fixes
+
+| Problem | Symptom | Root cause | Fix that worked |
+|--------|---------|------------|-----------------|
+| Blank noVNC after Run Episode | tmux session dies; only stale `frame.jpg` | `ros2 launch` aborts: `maprender_node` not in `lib/explorer_mission/` | `install(PROGRAMS)` for Python nodes in `CMakeLists.txt` |
+| No `map` TF / no `/grid_map` | `TF lookup failed: "map" … does not exist` | `get_pose` IPC error (quaternion ctor); swallowed at debug level | Explicit magnum quaternion from `(x,y,z,w)` components |
+| `/grid_map` empty or errors | `get_map failed: get_topdown_view() … height` | Habitat API needs vertical slice height | Pass agent floor `position[1]` |
+| Exploration completes instantly | `Received filtered frontiers (count=0)`; no navigation | Full navmesh published as FREE/OCCUPIED only — **zero UNKNOWN** cells; frontier = free∩unknown boundary | `explored_map.py` incremental reveal (`HABITAT_SENSOR_RANGE_M=4`) |
+| ~120 s between scan and frontiers | Captured images at t+0; frontiers at t+120 | `explore_node` `future.wait_for` without executor spin | `MultiThreadedExecutor` on background thread |
+| VLM client dies on first decision | `already been added to an executor` | `spin_some` in `viewsCb` while node is in `rclcpp::spin` | Async VLM goal + `checkTimeout` timer; no nested spin |
+| Fixes lost after Shutdown | Old bugs return | `compose down` recreates container; `install/` baked in image, not mounted | Rebuild `habitat3-exploration:latest` after C++ changes |
+
+### Verified end state (castle scene)
+- Filtered frontiers: **2** (was 0).
+- Time to first filtered frontiers: **~0.7 s** (was ~120 s).
+- Time to decision point: **~1.2 s**.
+- Map cells (example): free ~19k, unknown ~160k (incremental reveal working).
+- Tests: `test_explored_map.py` **7/7**; `test_frontier_detection` gtest **6/6**
+  (includes positive control + fully-known-map negative control).
+
+### Tests added
+- **`sim/scripts/test_explored_map.py`** — partial reveal → frontiers; full reveal →
+  no frontiers (negative control); wall blocking; doorway reach; mask accumulation.
+- **`test_frontier_detection.cpp`** — `RevealedDiscHasFrontier`,
+  `FullyKnownMapHasNoFrontier_NegativeControl`, `FilteredFrontierWithinRange`.
+
+### What did *not* work
+- Publishing the **raw Habitat navmesh** as the occupancy grid — mathematically
+  frontier-free (no unknown cells).
+- **`spin_some` inside action wait loops** — futures never complete; use a
+  background executor instead.
+- **`ament_python_install_package` alone** for hybrid packages — does not install
+  `setup.py` `console_scripts`; need explicit `install(PROGRAMS)`.
+- **In-container `colcon build` without image rebuild** — survives Stop/Reset
+  only; **Shutdown** (`compose down`) recreates from stale image.
+
+### Elytra lifecycle note
+| Action | Container | Fixes persist? |
+|--------|-----------|----------------|
+| Stop Episode | Kept | Yes |
+| Reset Simulation | `compose restart` (same container) | Yes |
+| Shutdown → start + connect | `compose down` → recreate from image | Only if image rebuilt |
+
+`scripts/` (`habitat_engine.py`, `explored_map.py`) are bind-mounted — Python
+changes are live immediately. C++ binaries require image rebuild or in-container
+`colcon build --packages-select explorer_mission`.
+
+### Key files
+- `habitat3-exploration/sim/scripts/explored_map.py` — incremental reveal logic
+- `habitat3-exploration/sim/scripts/habitat_engine.py` — `get_pose`, revealed `get_map`
+- `habitat3-exploration/sim/scripts/test_explored_map.py` — reveal unit tests
+- `habitat3-exploration/ros_workspace/src/explorer_mission/CMakeLists.txt` — Python node install
+- `habitat3-exploration/ros_workspace/src/explorer_mission/src/explore_node.cpp` — background executor
+- `habitat3-exploration/ros_workspace/src/explorer_mission/src/frontier_vlm_client_node.cpp` — no nested spin
+- `habitat3-exploration/ros_workspace/src/explorer_mission/explorer_mission/vlm/vlm_node.py` — f-string logging
+- `habitat3-exploration/ros_workspace/src/explorer_mission/test/test_frontier_detection.cpp` — regression tests
+
+### Harmless noise (still present)
+```
+SSD Load Failure! ... skokloster-castle.scn exists but failed to load
+```
+Mesh-only GLB; `load_semantic_mesh=False`. Ignore.
+
+### Still open
+- VLM frontier **selection** needs `GEMINI_API_KEY` in `sim/.env`; without it the
+  stack finds frontiers and reaches a decision point but cannot query Gemini.
+- `frontier_vlm_client` may log "No map image yet" on the first batch until
+  `maprender_node` publishes — retries on the next explore loop.
+
+---
+
+## 2026-06-24 (late) — VLM exploration stack migration (ROS 1 → ROS 2 Jazzy)
+
+### Goal
+Port the full `rtabmap_docker` VLM exploration pipeline into `habitat3-exploration`:
+frontiers, graph, actions, explore orchestrator, VLM client/server, map renderer.
+Replace `move_base` with discrete-move navigation for Habitat sim.
+
+### What we built
+- **`explorer_msgs`** extended with Frontier/Graph msgs, AddEdge/RunDijkstra srvs,
+  FrontierViewsProcess/Rotate360/PerceiveAndCapture actions.
+- **`explorer_mission`** (ament_cmake + Python): C++ nodes `frontiers`, `graph_node`,
+  `actions`, `frontier_vlm_client`, `explore`; Python `vlm_node` (gemini-3.5-flash),
+  `maprender_node`. Libs: `frontier_detection`, `graph_logic`, `discrete_navigator`.
+- **Habitat IPC** `get_pose` / `get_map`; `habitat_map_node` publishes `/grid_map`;
+  bridge publishes `/odom` + TF `map`→`base_link`.
+- **`exploration.launch.py`** brings up bridge + map + full mission stack.
+- **`start_sim.sh`** now launches `explorer_mission exploration.launch.py`.
+- **Tests**: 4 gtest + 16 bridge pytest + 8 mission pytest = **28/28 pass**.
+
+### move_base replacement
+`explore_node` uses `DiscreteNavigator` (0.25 m steps, 10° turns) via
+`/movement/discrete_move` action client — no Nav2 in sim image.
+
+### Key files
+- `habitat3-exploration/ros_workspace/src/explorer_mission/`
+- `habitat3-exploration/ros_workspace/design_doc.md` (updated exploration contract)
+- `habitat3-exploration/sim/scripts/habitat_engine.py` (get_pose, get_map)
+- `habitat3-exploration/sim/scripts/run_ros_tests.sh` (gtest + pytest)
+
+---
+
 ## 2026-06-24 — ROS 2 Jazzy shim for Habitat (topics + movement action)
 
 ### Goal

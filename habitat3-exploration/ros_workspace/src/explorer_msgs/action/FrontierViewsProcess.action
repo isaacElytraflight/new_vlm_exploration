@@ -1,0 +1,10 @@
+# Goal
+sensor_msgs/CompressedImage[] images
+sensor_msgs/CompressedImage map
+uint8[] frontiers
+---
+# Result
+int8 frontier
+---
+# Feedback
+int8 status

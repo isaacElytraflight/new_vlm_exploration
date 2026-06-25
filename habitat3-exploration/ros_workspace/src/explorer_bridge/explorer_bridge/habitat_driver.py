@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from explorer_bridge.driver_protocol import ObservationData, StepResult
+from explorer_bridge.driver_protocol import MapData, ObservationData, PoseData, StepResult
 from explorer_bridge.habitat_ipc import DEFAULT_SOCKET_PATH, HabitatIpcClient, HabitatIpcError
 
 
@@ -15,6 +15,12 @@ class HabitatDriver:
 
     def step(self, action: str, count: int = 1) -> StepResult:
         return self._client.step(action, count)
+
+    def get_pose(self) -> PoseData:
+        return self._client.get_pose()
+
+    def get_map(self) -> MapData:
+        return self._client.get_map()
 
     def reset(self) -> None:
         self._client.reset()

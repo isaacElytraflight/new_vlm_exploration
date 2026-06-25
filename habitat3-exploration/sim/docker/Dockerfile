@@ -25,8 +25,15 @@ RUN apt-get update && apt-get install -y software-properties-common && \
       ros-dev-tools \
       ros-jazzy-ros-base \
       ros-jazzy-rosidl-default-generators \
+      ros-jazzy-cv-bridge \
+      ros-jazzy-tf2-ros \
+      ros-jazzy-image-transport \
+      ros-jazzy-map-msgs \
+      ros-jazzy-ament-cmake-gtest \
       python3-colcon-common-extensions \
       python3-empy \
+      libopencv-dev \
+      libboost-graph-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Miniforge (conda) — habitat-sim prebuilt packages
@@ -45,8 +52,8 @@ RUN /opt/conda/envs/habitat/bin/pip install --no-cache-dir \
         "git+https://github.com/facebookresearch/habitat-lab.git@v0.3.1#subdirectory=habitat-lab" \
         imageio opencv-python "numpy<2"
 
-# Python deps for ROS bridge node (system Python 3.12 used by rclpy)
-RUN pip3 install --no-cache-dir --break-system-packages numpy pillow imageio
+# Python deps for ROS bridge + mission nodes (system Python 3.12 used by rclpy)
+RUN pip3 install --no-cache-dir --break-system-packages numpy pillow imageio requests opencv-python
 
 # --- EGL plumbing for headless NVIDIA rendering (incl. WSL2) -----------------
 RUN mkdir -p /usr/share/glvnd/egl_vendor.d \

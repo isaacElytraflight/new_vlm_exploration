@@ -18,9 +18,10 @@ setup(
     description="ROS 2 bridge for Habitat explorer sim and future hardware",
     license="MIT",
     tests_require=["pytest"],
-    entry_points={
+        entry_points={
         "console_scripts": [
             "explorer_bridge_node = explorer_bridge.explorer_bridge_node:main",
+            "habitat_map_node = explorer_bridge.habitat_map_node:main",
         ],
     },
 )

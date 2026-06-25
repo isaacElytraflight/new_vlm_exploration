@@ -9,7 +9,7 @@ from typing import Any, Dict
 
 import numpy as np
 
-from explorer_bridge.driver_protocol import ObservationData, StepResult
+from explorer_bridge.driver_protocol import MapData, ObservationData, PoseData, StepResult
 
 DEFAULT_SOCKET_PATH = "/tmp/habitat_engine.sock"
 CONNECT_TIMEOUT_SEC = 5.0
@@ -76,6 +76,24 @@ class HabitatIpcClient:
 
     def reset(self) -> None:
         self._request({"cmd": "reset"})
+
+    def get_pose(self) -> PoseData:
+        data = self._request({"cmd": "get_pose"})
+        return PoseData(
+            x=float(data["x"]),
+            y=float(data["y"]),
+            yaw_rad=float(data["yaw_rad"]),
+        )
+
+    def get_map(self) -> MapData:
+        data = self._request({"cmd": "get_map"})
+        grid = self._decode_array(data["grid_b64"], data["grid_shape"], "int8")
+        return MapData(
+            grid=grid,
+            resolution=float(data["resolution"]),
+            origin_x=float(data["origin_x"]),
+            origin_y=float(data["origin_y"]),
+        )
 
     def shutdown(self) -> None:
         try:

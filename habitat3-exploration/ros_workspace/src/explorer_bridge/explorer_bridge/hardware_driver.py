@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from explorer_bridge.driver_protocol import ObservationData, StepResult
+from explorer_bridge.driver_protocol import MapData, ObservationData, PoseData, StepResult
 
 
 class HardwareNotConfiguredError(RuntimeError):
@@ -17,6 +17,16 @@ class HardwareDriver:
         )
 
     def step(self, action: str, count: int = 1) -> StepResult:
+        raise HardwareNotConfiguredError(
+            "driver_backend=hardware is not wired yet."
+        )
+
+    def get_pose(self) -> PoseData:
+        raise HardwareNotConfiguredError(
+            "driver_backend=hardware is not wired yet."
+        )
+
+    def get_map(self) -> MapData:
         raise HardwareNotConfiguredError(
             "driver_backend=hardware is not wired yet."
         )
