@@ -46,9 +46,10 @@ VIEWER_PID=$!
 ENGINE_PID=$!
 
 cleanup() {
-    kill "$ENGINE_PID" "$VIEWER_PID" 2>/dev/null || true
+    kill "$ENGINE_PID" "$VIEWER_PID" "${VIEW_SERVER_PID:-}" 2>/dev/null || true
     pkill -f "habitat_engine.py" 2>/dev/null || true
     pkill -f "live_viewer.py" 2>/dev/null || true
+    pkill -f "elytra_view_server.py" 2>/dev/null || true
     rm -f /tmp/habitat_engine.sock 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
@@ -69,4 +70,11 @@ fi
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/bin:/opt/ros/jazzy/bin
 source /opt/ros/jazzy/setup.bash
 source /opt/explorer_workspace/ros_workspace/install/setup.bash
+
+pkill -f "elytra_view_server.py" 2>/dev/null || true
+(
+  exec python3 /opt/elytra/elytra_view_server.py
+) &
+VIEW_SERVER_PID=$!
+
 exec ros2 launch explorer_mission exploration.launch.py driver_backend:=habitat

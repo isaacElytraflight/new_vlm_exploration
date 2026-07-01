@@ -81,6 +81,8 @@ RUN mkdir -p /workspace/missions /workspace/scripts /data /opt/explorer_workspac
 COPY sim/scripts/ /workspace/scripts/
 RUN chmod +x /workspace/scripts/*.sh
 
+COPY sim/scripts/elytra_view_server.py /opt/elytra/elytra_view_server.py
+
 COPY ros_workspace/src/ /opt/explorer_workspace/ros_workspace/src/
 
 RUN /bin/bash -lc "export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/bin:/opt/ros/jazzy/bin && \
@@ -91,5 +93,5 @@ RUN /bin/bash -lc "export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/bin:/opt
 COPY sim/docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-EXPOSE 6080
+EXPOSE 6080 8090
 ENTRYPOINT ["/entrypoint.sh"]

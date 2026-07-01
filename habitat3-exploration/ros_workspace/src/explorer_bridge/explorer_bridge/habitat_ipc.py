@@ -63,7 +63,15 @@ class HabitatIpcClient:
         data = self._request({"cmd": "get_obs"})
         rgb = self._decode_array(data["rgb_b64"], data["rgb_shape"], "uint8")
         depth = self._decode_array(data["depth_b64"], data["depth_shape"], "float32")
-        return ObservationData(rgb=rgb, depth=depth, collided=bool(data.get("collided", False)))
+        birdseye = None
+        if "birdseye_b64" in data and "birdseye_shape" in data:
+            birdseye = self._decode_array(data["birdseye_b64"], data["birdseye_shape"], "uint8")
+        return ObservationData(
+            rgb=rgb,
+            depth=depth,
+            collided=bool(data.get("collided", False)),
+            birdseye=birdseye,
+        )
 
     def step(self, action: str, count: int = 1) -> StepResult:
         data = self._request({"cmd": "step", "action": action, "count": int(count)})

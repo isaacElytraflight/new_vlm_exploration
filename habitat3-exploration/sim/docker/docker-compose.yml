@@ -17,6 +17,11 @@ services:
       DISPLAY: ":1"
       # VLM frontier selection (set in sim/.env or Elytra backend .env)
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      VLM_BACKEND: ${VLM_BACKEND:-local}
+      VLM_OLLAMA_URL: ${VLM_OLLAMA_URL:-http://host.docker.internal:11434}
+      VLM_LOCAL_MODEL: ${VLM_LOCAL_MODEL:-qwen2.5vl:3b}
+      VLM_LOCAL_MAX_EDGE: ${VLM_LOCAL_MAX_EDGE:-512}
+      VLM_LOCAL_TIMEOUT_S: ${VLM_LOCAL_TIMEOUT_S:-30}
       # --- WSL2 GPU rendering path -------------------------------------------
       # Docker Desktop's WSL2 VM has no native NVIDIA EGL stack; OpenGL reaches
       # the GPU through Mesa's d3d12 driver -> libdxcore -> /dev/dxg -> host
@@ -45,6 +50,9 @@ services:
     shm_size: 2g
     ports:
       - "6080:6080"   # noVNC viewer (project.yaml novncOrigin)
+      - "8090:8090"   # Elytra multi-panel view server
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - /usr/lib/wsl:/usr/lib/wsl:ro       # WSL GPU userspace libs (dxcore/d3d12)
       - ../data:/data                      # scene datasets, persisted on host

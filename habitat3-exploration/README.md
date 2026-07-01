@@ -69,8 +69,13 @@ Open this folder in elytra-bridge via **File → Open Project** and connect in
   `/workspace/scripts/start_sim.sh` inside the `habitat` tmux session
 
 Copy `sim/.env.example` to `sim/.env` for local overrides (loaded only when
-connecting in sim mode). Set `GEMINI_API_KEY` there for VLM frontier selection;
-it is injected into the container via docker-compose `env_file`.
+connecting in sim mode). VLM frontier selection defaults to **local Ollama** on
+the host (`VLM_BACKEND=local`, model `qwen2.5vl:3b`). Install
+[Ollama](https://ollama.com), run `ollama pull qwen2.5vl:3b`, then start an
+episode. Optional cloud fallback: set `VLM_BACKEND=gemini` and `GEMINI_API_KEY`
+in `sim/.env` (see `sim/.env.example`); values are injected into the container
+via docker-compose `env_file`. Tune local latency with `VLM_LOCAL_MAX_EDGE` or
+run `python sim/scripts/benchmark_vlm.py` on the host (requires Ollama + Pillow).
 
 ## Notes
 

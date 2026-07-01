@@ -20,6 +20,7 @@ sim:
   composeProject: habitat3-exploration
   containerName: habitat3-sim
   novncOrigin: http://localhost:6080
+  viewServerPort: 8090
   missionDir: /workspace/missions
   rosInstallSetupPath: /opt/explorer_workspace/ros_workspace/install/setup.bash
   startScriptPath: /workspace/scripts/start_sim.sh
@@ -63,3 +64,18 @@ buttons:
     kind: script
     scriptPath: /workspace/scripts/run_movement_demo.sh
     oneshot: true
+
+views:
+  - id: third-person
+    label: Third Person
+    type: ros-image
+    topic: /birdseye_data
+    primary: true
+  - id: rgb
+    label: RGB Camera
+    type: ros-image
+    topic: /image_data
+  - id: grid-map
+    label: Grid Map
+    type: ros-compressed
+    topic: /map_renderer/map_img

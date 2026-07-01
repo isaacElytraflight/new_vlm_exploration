@@ -6,6 +6,87 @@ Add a new dated section at the top when you work on this repo.
 
 ---
 
+## 2026-07-01 — Local Ollama VLM, multi-panel sim views, frontier pipeline fixes
+
+### Goal
+Replace Gemini-only VLM with **local Ollama** (default) to avoid rate limits; add Elytra
+multi-panel simulation dashboard; fix frontier detection/filtering/VLM index bugs so
+exploration covers more of the map and VLM choices match map labels.
+
+### What we built
+
+**Local VLM backend (`habitat3-exploration`)**
+- Pluggable `vlm/backends/`: `OllamaBackend` (default) + `GeminiBackend` (opt-in).
+- Env: `VLM_BACKEND=local`, `VLM_OLLAMA_URL`, `VLM_LOCAL_MODEL`, `VLM_LOCAL_MAX_EDGE`, etc.
+- Wired through `docker-compose.yml`, `sim/.env.example`, Elytra Settings `envFields`.
+- `qwen3-vl:4b-instruct` on host Ollama (instruct variant — thinking model returns empty at low `num_predict`).
+- `think: false` in Ollama `/api/chat`; image downscale before inference; warmup on startup.
+- `sim/scripts/benchmark_vlm.py` for manual latency tuning.
+- **21** VLM pytest tests (mocked HTTP).
+
+**Elytra multi-panel simulation dashboard (`elytra-bridge`)**
+- `project.yaml` `views:` contract — third-person (`/birdseye_data`), RGB (`/image_data`), grid map (`/map_renderer/map_img`).
+- `SimulationDashboard.jsx` + `rosViewBridge.js` + `viewConfig.js`; proxy routes `/sim/views`, `/sim/views/:id/frame`.
+- `scripts/ros-view-server/elytra_view_server.py` on port **8090** in container.
+- Birdseye chase camera in `habitat_engine.py`; `/birdseye_data` in `explorer_bridge_node`.
+- **14/14** `simViews.test.js` pass.
+
+**Frontier + exploration fixes**
+- Renumber filtered frontier IDs to **0..K-1** (map labels, VLM captions, validation aligned).
+- Fix `maprender_node` contour drawing (pixel coords, not world).
+- Widen filter: **0.5–15 m**, max **8** frontiers; compute raw frontier midpoints.
+- VLM index validation against candidate count (not raw contour count) — fixes spurious choice of `4` when only 2 options.
+- `validate_frontier_choice()` in `parsing.py`; skip VLM for single-frontier batches.
+- Stronger explore fallback when filtered set empty; stop-reason logging.
+- Maprender re-renders on frontier update; `maprender` rate 1 Hz.
+
+**Earlier same session (carried in)**
+- Gemini API key fail-fast (`gemini_auth.py`).
+- Map image race: `frontier_vlm_client` pending retry + faster maprender.
+- `frontier_vlm_client` map batch queue when map not ready yet.
+
+### Problems & fixes
+
+| Problem | Symptom | Root cause | Fix that worked |
+|--------|---------|------------|-----------------|
+| Gemini rate limits | VLM failures mid-episode | Cloud quota | Local Ollama default; `VLM_BACKEND=gemini` fallback |
+| `qwen3-vl:4b` empty response | VLM returns blank / explore fails | Thinking model burns `num_predict` on internal reasoning | Use **`qwen3-vl:4b-instruct`**; `"think": false` in API |
+| Compose ignores `sim/.env` | Container still had old `VLM_*` defaults | `${VAR}` resolved from compose cwd, not `env_file` | `docker compose --env-file ../.env up` |
+| Frontier labels in white space | Numbers not on boundary | Contour `points` are grid pixels; maprender used `world_to_flipped_pixel` | `grid_pixel_to_flipped_pixel()` |
+| VLM picks frontier 4 with 2 options | Wrong navigation target | Validation vs `raw_frontiers_size`, not filtered IDs | Validate `0..N-1`; lookup by array index |
+| Few frontiers (count=1–2) | Large gray areas unexplored | 1–5 m filter, max 5, aggressive blacklist | 0.5–15 m, max 8, raw fallback |
+| "Freeze" after ~3 steps | Sim runs but no exploration | `explore_node` exited cleanly; orphan VLM query still in flight | Single-frontier: no VLM publish; fallback frontiers; stop logging |
+| View server 404 on rgb/bird | Panels empty | QoS mismatch on `sensor_msgs/Image` | `qos_profile_sensor_data` in view server |
+| No map at first VLM batch | "No map image yet" | maprender 0.1 Hz + one-shot client | 1 Hz maprender; pending batch retry |
+
+### Verified end state
+- Ollama **0.31.1** on Windows host; `qwen3-vl:4b-instruct` pulled; reachable from container (`host.docker.internal:11434`).
+- VLM tests **21/21** pytest; explorer_mission gtests pass.
+- Multi-panel proxies return HTTP 200 after connect + Run Episode.
+- Exploration runs multiple VLM decision cycles with 2–3 frontiers (improved from count=1); still stops early if all candidates blacklisted — fallback logic added today.
+
+### Key files
+- `habitat3-exploration/ros_workspace/src/explorer_mission/explorer_mission/vlm/backends/` — Ollama + Gemini
+- `habitat3-exploration/ros_workspace/src/explorer_mission/src/explore_node.cpp` — VLM index + fallback
+- `habitat3-exploration/ros_workspace/src/explorer_mission/src/frontiers_node.cpp` — filter params + renumber
+- `habitat3-exploration/ros_workspace/src/explorer_mission/explorer_mission/maprender_node.py` — contour fix
+- `habitat3-exploration/sim/.env.example` — Ollama setup
+- `elytra-bridge/application/frontend/src/SimulationDashboard.jsx`
+- `elytra-bridge/application/backend/src/rosViewBridge.js`
+- `elytra-bridge/scripts/ros-view-server/elytra_view_server.py`
+
+### Ops notes
+- **Ollama setup:** install on Windows, `ollama pull qwen3-vl:4b-instruct`, keep running before episodes.
+- **Compose env:** `cd sim/docker && docker compose --env-file ../.env up -d sim`
+- **Rebuild C++ after changes:** `colcon build --packages-select explorer_mission` in container (or rebuild image for Shutdown persistence).
+
+### Still open
+- Exploration may still terminate when all nearby frontiers are blacklisted despite large unknown regions — monitor `Stopping exploration: raw_frontiers=…` log; if `raw_frontiers=0`, trace `habitat_map_node` / incremental reveal.
+- VLM latency ~3–12 s per multi-image query on laptop GPU — tune `VLM_LOCAL_MAX_EDGE` (384) or use `benchmark_vlm.py`.
+- Birdseye / third-person panel depends on habitat engine chase camera — verify orientation per scene.
+
+---
+
 ## 2026-06-25 — Exploration episode E2E: blank screen, zero frontiers, 120 s delay
 
 ### Goal

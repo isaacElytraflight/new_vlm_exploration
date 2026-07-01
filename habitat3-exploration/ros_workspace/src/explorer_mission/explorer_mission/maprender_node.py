@@ -51,17 +51,21 @@ class MapRenderNode(Node):
             "graph_render_throttle_s", 5.0).value
         self._last_graph_render_time = 0.0
 
-        rate_hz = self.declare_parameter("rate_hz", 0.1).value
+        rate_hz = self.declare_parameter("rate_hz", 1.0).value
         period = 1.0 / max(rate_hz, 1e-6)
         self.create_timer(period, self.tick)
 
     def map_cb(self, msg: OccupancyGrid) -> None:
+        first_map = False
         with self.map_lock:
+            first_map = self.map_arr is None
             self.map_msg = msg
             self.map_arr = np.asarray(msg.data, dtype=np.int8).reshape(
                 (msg.info.height, msg.info.width))
             self.map_res = msg.info.resolution
             self.map_origin = (msg.info.origin.position.x, msg.info.origin.position.y)
+        if first_map:
+            self.render_and_publish()
 
     def graph_cb(self, msg: Graph) -> None:
         self.graph_msg = msg
@@ -73,6 +77,8 @@ class MapRenderNode(Node):
 
     def frontier_cb(self, msg: FrontierArray) -> None:
         self.frontiers_msg = msg
+        if self.map_arr is not None:
+            self.render_and_publish()
 
     def get_pose(self) -> tuple[float, float, float]:
         trans: TransformStamped = self.tf_buffer.lookup_transform(
@@ -119,11 +125,17 @@ class MapRenderNode(Node):
             col = w - 1 - col
             return col, row
 
+        def grid_pixel_to_flipped_pixel(px, py):
+            # frontier.points store OpenCV grid indices (col=x, row=y), not world coords
+            col = w - 1 - int(round(px))
+            row = int(round(py))
+            return col, row
+
         font = cv2.FONT_HERSHEY_SIMPLEX
         if self.frontiers_msg and getattr(self.frontiers_msg, "frontiers", None):
             for frontier in self.frontiers_msg.frontiers:
                 pts = np.array([
-                    [world_to_flipped_pixel(p.x, p.y)]
+                    [grid_pixel_to_flipped_pixel(p.x, p.y)]
                     for p in frontier.points
                 ], dtype=np.int32)
                 cv2.drawContours(color, [pts], -1, frontier_outline_color, 1)

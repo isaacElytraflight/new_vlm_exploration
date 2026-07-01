@@ -36,6 +36,7 @@ DIRECTION_TO_ACTION = {
 
 VALID_DIRECTIONS = set(DIRECTION_TO_ACTION.keys())
 DEFAULT_LIVE_FRAME = "/tmp/habitat_live/frame.jpg"
+DEFAULT_BIRDSEYE_FRAME = "/tmp/habitat_live/birdseye.jpg"
 
 
 def create_driver(backend: str, socket_path: str) -> ExplorerDriver:
@@ -56,8 +57,10 @@ class ExplorerBridgeNode(Node):
         self.declare_parameter("habitat_socket_path", "/tmp/habitat_engine.sock")
         self.declare_parameter("publish_hz", float(os.environ.get("HABITAT_VIEW_FPS", "15")))
         self.declare_parameter("live_frame_path", DEFAULT_LIVE_FRAME)
+        self.declare_parameter("birdseye_frame_path", DEFAULT_BIRDSEYE_FRAME)
         self.declare_parameter("rgb_topic", "/image_data")
         self.declare_parameter("depth_topic", "/depth_data")
+        self.declare_parameter("birdseye_topic", "/birdseye_data")
         self.declare_parameter("action_name", "/movement/discrete_move")
         self.declare_parameter("publish_odom", True)
         self.declare_parameter("map_frame", "map")
@@ -70,13 +73,16 @@ class ExplorerBridgeNode(Node):
 
         rgb_topic = self.get_parameter("rgb_topic").get_parameter_value().string_value
         depth_topic = self.get_parameter("depth_topic").get_parameter_value().string_value
+        birdseye_topic = self.get_parameter("birdseye_topic").get_parameter_value().string_value
         action_name = self.get_parameter("action_name").get_parameter_value().string_value
 
         self._live_frame = self.get_parameter("live_frame_path").get_parameter_value().string_value
+        self._birdseye_frame = self.get_parameter("birdseye_frame_path").get_parameter_value().string_value
         publish_hz = max(0.1, self.get_parameter("publish_hz").get_parameter_value().double_value)
 
         self._rgb_pub = self.create_publisher(Image, rgb_topic, qos_profile_sensor_data)
         self._depth_pub = self.create_publisher(Image, depth_topic, qos_profile_sensor_data)
+        self._birdseye_pub = self.create_publisher(Image, birdseye_topic, qos_profile_sensor_data)
 
         self._cb_group = ReentrantCallbackGroup()
         self._action_server = ActionServer(
@@ -142,6 +148,17 @@ class ExplorerBridgeNode(Node):
         self._depth_pub.publish(
             depth_array_to_image(obs.depth, header=header, frame_id="lidar_depth")
         )
+
+        if obs.birdseye is not None:
+            birdseye_header = Header(stamp=stamp, frame_id="birdseye")
+            self._birdseye_pub.publish(
+                rgb_array_to_image(obs.birdseye, header=birdseye_header, frame_id="birdseye")
+            )
+            try:
+                os.makedirs(os.path.dirname(self._birdseye_frame), exist_ok=True)
+                write_jpeg_frame(self._birdseye_frame, obs.birdseye)
+            except Exception as exc:
+                self.get_logger().debug(f"birdseye frame write skipped: {exc}")
 
         try:
             os.makedirs(os.path.dirname(self._live_frame), exist_ok=True)

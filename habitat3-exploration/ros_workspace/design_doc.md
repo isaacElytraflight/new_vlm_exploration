@@ -63,4 +63,5 @@ Navigation in sim uses `DiscreteMove` sequences (replaces ROS 1 `move_base`). Re
 
 - Sim ROS setup: `/opt/explorer_workspace/ros_workspace/install/setup.bash`
 - Launch: `ros2 launch explorer_mission exploration.launch.py`
-- VLM requires `GEMINI_API_KEY` in `sim/.env` (copy from `sim/.env.example`) or Elytra backend `.env`
+- VLM defaults to **local Ollama** (`VLM_BACKEND=local`) via `http://host.docker.internal:11434`. Pull `qwen2.5vl:3b` on the host before running episodes. Optional Gemini cloud: `VLM_BACKEND=gemini` + `GEMINI_API_KEY` in `sim/.env` or Elytra backend `.env`.
+- Tune local latency with `VLM_LOCAL_MAX_EDGE` (default 512) or run `python sim/scripts/benchmark_vlm.py` on the host with Ollama running.

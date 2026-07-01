@@ -32,6 +32,10 @@ public:
     base_frame_ = declare_parameter<std::string>("base_frame", "base_link");
     grid_topic_ = declare_parameter<std::string>("grid_topic", "/grid_map");
     subscribe_costmap_updates_ = declare_parameter<bool>("subscribe_costmap_updates", true);
+    min_radius_m_ = declare_parameter<double>("min_radius_m", 0.5);
+    max_radius_m_ = declare_parameter<double>("max_radius_m", 15.0);
+    max_frontiers_ = declare_parameter<int>("max_frontiers", 8);
+    min_contour_pixels_ = declare_parameter<int>("min_contour_pixels", 15);
 
     grid_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
       grid_topic_, rclcpp::QoS(1),
@@ -77,12 +81,14 @@ private:
 
   void refreshFrontiersFromGrid()
   {
-    all_frontiers_ = explorer_mission::findFrontierContours(grid_map_msg_);
+    all_frontiers_ = explorer_mission::findFrontierContours(
+      grid_map_msg_, min_contour_pixels_);
     publishFrontiers();
 
     const cv::Point2f robot_pos = getRobotPositionInMapFrame();
     filtered_frontiers_ = explorer_mission::filterFrontiers(
-      all_frontiers_, grid_map_msg_, robot_pos, frontier_blacklist_, 1.0, 5.0, 5);
+      all_frontiers_, grid_map_msg_, robot_pos, frontier_blacklist_,
+      min_radius_m_, max_radius_m_, static_cast<size_t>(max_frontiers_));
     publishFilteredFrontiers();
   }
 
@@ -93,6 +99,7 @@ private:
     frontier_array.header.frame_id = map_frame_;
     frontier_array.total_count = static_cast<int32_t>(filtered_frontiers_.size());
 
+    uint8_t display_id = 0;
     for (const auto & frontier : filtered_frontiers_) {
       explorer_msgs::msg::Frontier new_frontier;
       new_frontier.header = frontier_array.header;
@@ -109,7 +116,7 @@ private:
       new_frontier.midpoint.x = frontier.midpoint_world.x;
       new_frontier.midpoint.y = frontier.midpoint_world.y;
       new_frontier.midpoint.z = 0.0;
-      new_frontier.id = frontier.id;
+      new_frontier.id = display_id++;
       frontier_array.frontiers.push_back(new_frontier);
     }
 
@@ -124,6 +131,7 @@ private:
     frontier_array.total_count = static_cast<int32_t>(all_frontiers_.size());
 
     uint8_t idx = 0;
+    const cv::Point2f robot_pos = getRobotPositionInMapFrame();
     for (const auto & contour : all_frontiers_) {
       explorer_msgs::msg::Frontier frontier;
       frontier.header = frontier_array.header;
@@ -136,9 +144,12 @@ private:
         frontier.points.push_back(point);
       }
 
-      frontier.distance = 0.0;
-      frontier.midpoint.x = 0.0;
-      frontier.midpoint.y = 0.0;
+      const cv::Point2f midpoint_world = explorer_mission::frontierMidpointWorld(
+        contour, grid_map_msg_);
+      frontier.distance = explorer_mission::euclideanDist(
+        robot_pos, midpoint_world);
+      frontier.midpoint.x = midpoint_world.x;
+      frontier.midpoint.y = midpoint_world.y;
       frontier.midpoint.z = 0.0;
       frontier.id = static_cast<uint8_t>(idx & 0xFF);
       frontier_array.frontiers.push_back(frontier);
@@ -215,6 +226,10 @@ private:
   std::string base_frame_;
   std::string grid_topic_;
   bool subscribe_costmap_updates_{true};
+  double min_radius_m_{0.5};
+  double max_radius_m_{15.0};
+  int max_frontiers_{8};
+  int min_contour_pixels_{15};
 
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;

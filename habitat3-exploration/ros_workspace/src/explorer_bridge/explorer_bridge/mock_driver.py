@@ -35,9 +35,11 @@ class MockHabitatDriver:
             raise RuntimeError("mock engine is dead")
         rgb = np.zeros((self._height, self._width, 3), dtype=np.uint8)
         rgb[0, 0] = MARKER_RGB
+        birdseye = np.zeros((self._height, self._width, 3), dtype=np.uint8)
+        birdseye[2, 2] = (200, 100, 50)
         depth = np.full((self._height, self._width), MARKER_DEPTH, dtype=np.float32)
         depth[1, 1] = MARKER_DEPTH + 0.5
-        return ObservationData(rgb=rgb, depth=depth, collided=self._collided)
+        return ObservationData(rgb=rgb, depth=depth, collided=self._collided, birdseye=birdseye)
 
     def step(self, action: str, count: int = 1) -> StepResult:
         if not self._alive:

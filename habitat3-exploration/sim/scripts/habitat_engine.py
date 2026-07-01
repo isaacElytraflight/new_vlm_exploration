@@ -20,6 +20,8 @@ import socket
 import sys
 from typing import Any, Dict, Optional, Tuple
 
+import math
+
 import habitat_sim
 import magnum as mn
 import numpy as np
@@ -64,8 +66,17 @@ def make_sim() -> habitat_sim.Simulator:
     depth.resolution = [480, 640]
     depth.position = [0.0, 1.5, 0.0]
 
+    birdseye = habitat_sim.CameraSensorSpec()
+    birdseye.uuid = "birdseye"
+    birdseye.sensor_type = habitat_sim.SensorType.COLOR
+    birdseye.resolution = [480, 640]
+    # Gazebo-style chase cam: elevated and behind the agent (+Z), pitched down.
+    birdseye.position = [0.0, 3.5, 2.5]
+    pitch_rad = math.radians(-35.0)
+    birdseye.orientation = mn.Vector3(pitch_rad, 0.0, 0.0)
+
     agent_cfg = habitat_sim.agent.AgentConfiguration()
-    agent_cfg.sensor_specifications = [rgb, depth]
+    agent_cfg.sensor_specifications = [rgb, depth, birdseye]
 
     # Explicit actuation so move_backward is available alongside defaults.
     agent_cfg.action_space = {
@@ -111,16 +122,19 @@ class HabitatEngine:
         self._collided = False
         self._explored = None
 
-    def get_obs(self) -> Tuple[np.ndarray, np.ndarray, bool]:
+    def get_obs(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, bool]:
         rgb = self._last_obs.get("rgb")
         depth = self._last_obs.get("depth")
-        if rgb is None or depth is None:
+        birdseye = self._last_obs.get("birdseye")
+        if rgb is None or depth is None or birdseye is None:
             obs = self._sim.get_sensor_observations()
             rgb = obs.get("rgb")
             depth = obs.get("depth")
+            birdseye = obs.get("birdseye")
         rgb_arr = np.ascontiguousarray(rgb[..., :3], dtype=np.uint8)
         depth_arr = np.ascontiguousarray(depth.squeeze(), dtype=np.float32)
-        return rgb_arr, depth_arr, self._collided
+        birdseye_arr = np.ascontiguousarray(birdseye[..., :3], dtype=np.uint8)
+        return rgb_arr, depth_arr, birdseye_arr, self._collided
 
     def step(self, action: str, count: int) -> Tuple[bool, int]:
         allowed = {"move_forward", "move_backward", "turn_left", "turn_right"}
@@ -184,13 +198,15 @@ class HabitatEngine:
 
 
 def _encode_obs_response(engine: HabitatEngine) -> Dict[str, Any]:
-    rgb, depth, collided = engine.get_obs()
+    rgb, depth, birdseye, collided = engine.get_obs()
     return {
         "ok": True,
         "rgb_b64": base64.b64encode(rgb.tobytes()).decode("ascii"),
         "rgb_shape": list(rgb.shape),
         "depth_b64": base64.b64encode(depth.tobytes()).decode("ascii"),
         "depth_shape": list(depth.shape),
+        "birdseye_b64": base64.b64encode(birdseye.tobytes()).decode("ascii"),
+        "birdseye_shape": list(birdseye.shape),
         "collided": collided,
     }
 

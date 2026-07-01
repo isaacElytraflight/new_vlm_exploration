@@ -13,6 +13,7 @@ class ObservationData:
     rgb: np.ndarray
     depth: np.ndarray
     collided: bool
+    birdseye: np.ndarray | None = None
 
 
 @dataclass

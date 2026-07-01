@@ -151,16 +151,12 @@ public:
       std::vector<explorer_msgs::msg::Frontier> closest_frontiers;
       if (!getFrontiersToExplore(closest_frontiers, starting_vertex)) {
         if (traversal_vertex_.id == 0) {
+          logExplorationStopReason();
           break;
         }
         continue;
       }
 
-      explorer_msgs::msg::FrontierArray snapshot_raw_frontiers;
-      {
-        std::lock_guard<std::mutex> lock(frontiers_mutex_);
-        snapshot_raw_frontiers = latest_raw_frontiers_;
-      }
       const auto snapshot_closest_frontiers = closest_frontiers;
 
       if (snapshot_closest_frontiers.size() > 1) {
@@ -183,29 +179,29 @@ public:
         continue;
       }
 
-      frontier_views_pub_->publish(frontier_views_msg);
-      chosen_frontier_received_ = false;
-
       int8_t chosen_idx = 0;
-      if (!selectFrontierIndex(
-          snapshot_closest_frontiers, snapshot_raw_frontiers.frontiers.size(), chosen_idx))
-      {
-        continue;
-      }
-
-      const explorer_msgs::msg::Frontier * chosen_frontier = nullptr;
-      for (const auto & frontier : snapshot_closest_frontiers) {
-        if (static_cast<int8_t>(frontier.id) == chosen_idx) {
-          chosen_frontier = &frontier;
-          break;
+      if (snapshot_closest_frontiers.size() > 1) {
+        frontier_views_pub_->publish(frontier_views_msg);
+        chosen_frontier_received_ = false;
+        if (!selectFrontierIndex(snapshot_closest_frontiers, chosen_idx)) {
+          continue;
         }
+      } else {
+        RCLCPP_INFO(get_logger(), "Single frontier available; auto-selecting index 0.");
       }
-      if (!chosen_frontier) {
-        RCLCPP_ERROR(get_logger(), "Chosen frontier ID %d not found in filtered set.", chosen_idx);
+
+      if (static_cast<size_t>(chosen_idx) >= snapshot_closest_frontiers.size()) {
+        RCLCPP_ERROR(
+          get_logger(), "Chosen frontier index %d out of range (count=%zu).",
+          chosen_idx, snapshot_closest_frontiers.size());
+        blacklistFrontiers(snapshot_closest_frontiers);
         continue;
       }
 
-      navigateToFrontier(*chosen_frontier);
+      const explorer_msgs::msg::Frontier & chosen_frontier =
+        snapshot_closest_frontiers[static_cast<size_t>(chosen_idx)];
+
+      navigateToFrontier(chosen_frontier);
 
       prev_vertex_ = starting_vertex;
       traversal_vertex_.id = 0;
@@ -299,7 +295,8 @@ private:
 
     updateRobotPoseFromTf();
 
-    for (const auto & frontier : frontiers) {
+    for (size_t display_id = 0; display_id < frontiers.size(); ++display_id) {
+      const auto & frontier = frontiers[display_id];
       const double dx = frontier.midpoint.x - current_pos_.x;
       const double dy = frontier.midpoint.y - current_pos_.y;
       double target_yaw_deg = std::atan2(dy, dx) * 180.0 / M_PI;
@@ -321,7 +318,7 @@ private:
       }
 
       msg.images.push_back(cached_images_[best_idx]);
-      msg.frontiers.push_back(frontier.id);
+      msg.frontiers.push_back(static_cast<uint8_t>(display_id));
     }
     return msg;
   }
@@ -426,13 +423,23 @@ private:
     }
 
     if (decision_point_stack_.empty()) {
-      frontiers_out = getFrontiersInRange(1.0, 60.0);
+      frontiers_out = getFrontiersInRange(0.5, 60.0);
+      if (frontiers_out.empty()) {
+        frontiers_out = getAnyUnblacklistedRawFrontiers();
+      }
       if (frontiers_out.empty()) {
         return false;
       }
+      renumberFrontierIds(frontiers_out);
+      RCLCPP_INFO(
+        get_logger(), "Using %zu fallback raw frontiers (filtered set empty).",
+        frontiers_out.size());
       return true;
     }
 
+    RCLCPP_INFO(
+      get_logger(), "No filtered frontiers; attempting dead-end backtrack (%zu decision points).",
+      decision_point_stack_.size());
     traversal_vertex_ = handleDeadEnd(starting_vertex);
     if (traversal_vertex_.id == 0) {
       return false;
@@ -444,9 +451,11 @@ private:
 
   bool selectFrontierIndex(
     const std::vector<explorer_msgs::msg::Frontier> & frontiers,
-    size_t raw_frontiers_size,
     int8_t & chosen_idx_out)
   {
+    if (frontiers.empty()) {
+      return false;
+    }
     if (frontiers.size() > 1) {
       const auto start = now();
       while (!chosen_frontier_received_ && rclcpp::ok() &&
@@ -460,16 +469,18 @@ private:
       }
       const int chosen_index = latest_chosen_frontier_index_.load();
       if (chosen_index < 0 ||
-        static_cast<size_t>(chosen_index) >= raw_frontiers_size)
+        static_cast<size_t>(chosen_index) >= frontiers.size())
       {
+        RCLCPP_WARN(
+          get_logger(),
+          "VLM chose invalid frontier index %d (valid 0..%zu); blacklisting candidates.",
+          chosen_index, frontiers.size() - 1);
         blacklistFrontiers(frontiers);
         return false;
       }
       chosen_idx_out = static_cast<int8_t>(chosen_index);
-    } else if (frontiers.size() == 1) {
-      chosen_idx_out = static_cast<int8_t>(frontiers[0].id);
     } else {
-      return false;
+      chosen_idx_out = 0;
     }
     return true;
   }
@@ -481,6 +492,63 @@ private:
     if (!ok) {
       RCLCPP_WARN(get_logger(), "Navigation failed; frontier blacklisted.");
     }
+  }
+
+  static void renumberFrontierIds(std::vector<explorer_msgs::msg::Frontier> & frontiers)
+  {
+    for (size_t i = 0; i < frontiers.size(); ++i) {
+      frontiers[i].id = static_cast<uint8_t>(i & 0xFF);
+    }
+  }
+
+  void logExplorationStopReason()
+  {
+    size_t raw_count = 0;
+    size_t filtered_count = 0;
+    {
+      std::lock_guard<std::mutex> lock(frontiers_mutex_);
+      raw_count = latest_raw_frontiers_.frontiers.size();
+      filtered_count = latest_filtered_frontiers_.frontiers.size();
+    }
+    RCLCPP_WARN(
+      get_logger(),
+      "Stopping exploration: raw_frontiers=%zu filtered_frontiers=%zu "
+      "blacklist_entries=%zu decision_points=%zu",
+      raw_count, filtered_count, frontier_blacklist_.size(), decision_point_stack_.size());
+  }
+
+  std::vector<explorer_msgs::msg::Frontier> getAnyUnblacklistedRawFrontiers()
+  {
+    std::vector<explorer_msgs::msg::Frontier> result;
+    std::vector<explorer_msgs::msg::Frontier> raw;
+    {
+      std::lock_guard<std::mutex> lock(frontiers_mutex_);
+      raw = latest_raw_frontiers_.frontiers;
+    }
+    for (const auto & frontier : raw) {
+      const Point2f frontier_pos(
+        static_cast<float>(frontier.midpoint.x),
+        static_cast<float>(frontier.midpoint.y));
+      if (frontier_pos.x == 0.0f && frontier_pos.y == 0.0f) {
+        continue;
+      }
+      if (!isBlacklisted(frontier_pos)) {
+        result.push_back(frontier);
+      }
+    }
+    std::sort(
+      result.begin(), result.end(),
+      [this](const explorer_msgs::msg::Frontier & a, const explorer_msgs::msg::Frontier & b) {
+        const double da = explorer_mission::euclideanDist(
+          current_pos_, Point2f(static_cast<float>(a.midpoint.x), static_cast<float>(a.midpoint.y)));
+        const double db = explorer_mission::euclideanDist(
+          current_pos_, Point2f(static_cast<float>(b.midpoint.x), static_cast<float>(b.midpoint.y)));
+        return da < db;
+      });
+    if (result.size() > 8) {
+      result.resize(8);
+    }
+    return result;
   }
 
   std::vector<explorer_msgs::msg::Frontier> getFrontiersInRange(
@@ -510,8 +578,8 @@ private:
           current_pos_, Point2f(static_cast<float>(b.midpoint.x), static_cast<float>(b.midpoint.y)));
         return da < db;
       });
-    if (result.size() > 5) {
-      result.resize(5);
+    if (result.size() > 8) {
+      result.resize(8);
     }
     return result;
   }
@@ -535,8 +603,8 @@ private:
         result.push_back(frontier);
       }
     }
-    if (result.size() > 5) {
-      result.resize(5);
+    if (result.size() > 8) {
+      result.resize(8);
     }
     return result;
   }
@@ -671,7 +739,7 @@ private:
       decision_point_stack_.erase(decision_point_stack_.begin());
 
       const auto frontiers = getFrontiersNearPoint(
-        traversal_vertex.x, traversal_vertex.y, 1.0, 5.0);
+        traversal_vertex.x, traversal_vertex.y, 0.5, 15.0);
       if (frontiers.empty()) {
         continue;
       }
@@ -696,9 +764,13 @@ private:
         current_pos_.x, current_pos_.y, current_yaw_deg_,
         final_pose.position.x, final_pose.position.y, goal_yaw);
       if (executeDiscretePlan(plan)) {
+        RCLCPP_INFO(
+          get_logger(), "Dead-end backtrack succeeded toward decision point id=%d.",
+          traversal_vertex.id);
         return traversal_vertex;
       }
     }
+    RCLCPP_WARN(get_logger(), "Dead-end backtrack exhausted all decision points.");
     return empty;
   }
 

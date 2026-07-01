@@ -53,8 +53,15 @@ public:
 private:
   void mapCb(const sensor_msgs::msg::CompressedImage::SharedPtr map_msg)
   {
-    std::lock_guard<std::mutex> lk(map_mtx_);
-    latest_map_ = map_msg;
+    explorer_msgs::msg::FrontierViews::SharedPtr pending;
+    {
+      std::lock_guard<std::mutex> lk(map_mtx_);
+      latest_map_ = map_msg;
+      pending = pending_views_;
+    }
+    if (pending) {
+      tryProcessViews(pending);
+    }
   }
 
   // Event-driven: validate the batch, then fire the VLM goal asynchronously and
@@ -64,9 +71,18 @@ private:
   void viewsCb(const explorer_msgs::msg::FrontierViews::SharedPtr fv)
   {
     RCLCPP_INFO(get_logger(), "Received frontier views");
+    tryProcessViews(fv);
+  }
 
+  void tryProcessViews(const explorer_msgs::msg::FrontierViews::SharedPtr fv)
+  {
     if (require_frontiers_ && fv->frontiers.empty()) {
       RCLCPP_DEBUG(get_logger(), "FrontierViews received but no frontiers; skipping.");
+      return;
+    }
+    if (fv->frontiers.size() <= 1) {
+      RCLCPP_DEBUG(
+        get_logger(), "Single-frontier batch; explore_node auto-selects without VLM.");
       return;
     }
     if (fv->images.size() != fv->frontiers.size()) {
@@ -80,11 +96,13 @@ private:
       map = latest_map_;
     }
     if (!map) {
-      // The next FrontierViews batch (re-published every explore loop) will
-      // retry once the map renderer has produced an image.
+      {
+        std::lock_guard<std::mutex> lk(map_mtx_);
+        pending_views_ = fv;
+      }
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 2000,
-        "No map image yet; skipping this batch (will retry on next).");
+        "No map image yet; queued batch (will retry when map arrives).");
       return;
     }
 
@@ -100,6 +118,11 @@ private:
         return;
       }
       last_sig_ = sig;
+    }
+
+    {
+      std::lock_guard<std::mutex> lk(map_mtx_);
+      pending_views_.reset();
     }
 
     FrontierViewsProcess::Goal goal;
@@ -177,6 +200,7 @@ private:
 
   std::mutex map_mtx_;
   sensor_msgs::msg::CompressedImage::SharedPtr latest_map_;
+  explorer_msgs::msg::FrontierViews::SharedPtr pending_views_;
 
   rclcpp::TimerBase::SharedPtr timeout_timer_;
   rclcpp::Publisher<std_msgs::msg::Int8>::SharedPtr chosen_pub_;
