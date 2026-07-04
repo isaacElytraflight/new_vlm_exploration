@@ -13,6 +13,44 @@ std::vector<std::vector<cv::Point>> findFrontierContours(
   const nav_msgs::msg::OccupancyGrid & grid,
   int min_length_pixels)
 {
+  cv::Mat allowed;
+  allowed.create(grid.info.height, grid.info.width, CV_8U);
+  allowed.setTo(255);
+  return findFrontierContoursMasked(grid, allowed, min_length_pixels);
+}
+
+cv::Mat buildExclusionMask(
+  const nav_msgs::msg::OccupancyGrid & grid,
+  const std::vector<cv::Point2f> & exclusion_centers_world,
+  double exclusion_radius_m)
+{
+  const int width = static_cast<int>(grid.info.width);
+  const int height = static_cast<int>(grid.info.height);
+  cv::Mat mask(height, width, CV_8U, cv::Scalar(255));
+
+  if (width <= 0 || height <= 0 || exclusion_radius_m <= 0.0) {
+    return mask;
+  }
+
+  const double resolution = grid.info.resolution;
+  const int radius_px = std::max(
+    1, static_cast<int>(std::ceil(exclusion_radius_m / resolution)));
+  const float origin_x = static_cast<float>(grid.info.origin.position.x);
+  const float origin_y = static_cast<float>(grid.info.origin.position.y);
+
+  for (const auto & center : exclusion_centers_world) {
+    const int col = static_cast<int>(std::round((center.x - origin_x) / resolution));
+    const int row = static_cast<int>(std::round((center.y - origin_y) / resolution));
+    cv::circle(mask, cv::Point(col, row), radius_px, cv::Scalar(0), cv::FILLED);
+  }
+  return mask;
+}
+
+std::vector<std::vector<cv::Point>> findFrontierContoursMasked(
+  const nav_msgs::msg::OccupancyGrid & grid,
+  const cv::Mat & allowed_mask,
+  int min_length_pixels)
+{
   std::vector<std::vector<cv::Point>> result;
 
   if (grid.data.empty()) {
@@ -44,6 +82,12 @@ std::vector<std::vector<cv::Point>> findFrontierContours(
   cv::bitwise_and(is_free, has_unknown_neighbor, frontier_mask);
   frontier_mask.convertTo(frontier_mask, CV_8U, 255.0);
 
+  if (!allowed_mask.empty() &&
+    allowed_mask.rows == height && allowed_mask.cols == width)
+  {
+    cv::bitwise_and(frontier_mask, allowed_mask, frontier_mask);
+  }
+
   std::vector<std::vector<cv::Point>> contours;
   cv::findContours(frontier_mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
 
@@ -53,6 +97,26 @@ std::vector<std::vector<cv::Point>> findFrontierContours(
     }
   }
 
+  return result;
+}
+
+std::vector<std::vector<cv::Point>> filterContoursNearRobot(
+  const std::vector<std::vector<cv::Point>> & contours,
+  const nav_msgs::msg::OccupancyGrid & grid,
+  const cv::Point2f & robot_pos,
+  double radius_m)
+{
+  std::vector<std::vector<cv::Point>> result;
+  if (radius_m <= 0.0) {
+    return result;
+  }
+
+  for (const auto & contour : contours) {
+    const cv::Point2f midpoint = frontierMidpointWorld(contour, grid);
+    if (euclideanDist(robot_pos, midpoint) <= radius_m) {
+      result.push_back(contour);
+    }
+  }
   return result;
 }
 
@@ -93,58 +157,6 @@ double euclideanDist(const cv::Point2f & a, const cv::Point2f & b)
   const double dx = a.x - b.x;
   const double dy = a.y - b.y;
   return std::sqrt(dx * dx + dy * dy);
-}
-
-std::vector<FrontierWithDistance> filterFrontiers(
-  const std::vector<std::vector<cv::Point>> & contours,
-  const nav_msgs::msg::OccupancyGrid & grid,
-  const cv::Point2f & robot_pos,
-  const std::vector<cv::Point2f> & blacklist,
-  double min_radius_m,
-  double max_radius_m,
-  size_t max_frontiers)
-{
-  std::vector<FrontierWithDistance> frontiers_with_dist;
-
-  if (robot_pos.x == -1000.0f && robot_pos.y == -1000.0f) {
-    return frontiers_with_dist;
-  }
-
-  uint8_t idx = 0;
-  for (const auto & contour : contours) {
-    const cv::Point2f midpoint_world = frontierMidpointWorld(contour, grid);
-    const double distance_to_robot = euclideanDist(robot_pos, midpoint_world);
-
-    if (distance_to_robot < min_radius_m || distance_to_robot > max_radius_m) {
-      ++idx;
-      continue;
-    }
-
-    bool is_in_blacklist = false;
-    for (const auto & point : blacklist) {
-      if (euclideanDist(point, midpoint_world) < 0.5) {
-        is_in_blacklist = true;
-        break;
-      }
-    }
-
-    if (!is_in_blacklist) {
-      frontiers_with_dist.push_back({distance_to_robot, midpoint_world, contour, idx});
-    }
-    ++idx;
-  }
-
-  std::sort(
-    frontiers_with_dist.begin(), frontiers_with_dist.end(),
-    [](const FrontierWithDistance & a, const FrontierWithDistance & b) {
-      return a.distance < b.distance;
-    });
-
-  if (frontiers_with_dist.size() > max_frontiers) {
-    frontiers_with_dist.resize(max_frontiers);
-  }
-
-  return frontiers_with_dist;
 }
 
 }  // namespace explorer_mission

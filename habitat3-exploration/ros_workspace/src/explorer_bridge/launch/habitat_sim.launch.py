@@ -22,6 +22,9 @@ def generate_launch_description():
                     {"driver_backend": LaunchConfiguration("driver_backend")},
                     {"habitat_socket_path": LaunchConfiguration("habitat_socket_path")},
                     {"publish_hz": LaunchConfiguration("publish_hz")},
+                    {"odom_frame": "odom"},
+                    {"map_frame": "map"},
+                    {"base_frame": "base_link"},
                 ],
             ),
         ]

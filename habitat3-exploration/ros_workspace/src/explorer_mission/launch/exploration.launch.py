@@ -1,5 +1,6 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -13,6 +14,10 @@ def generate_launch_description() -> LaunchDescription:
     driver_backend = LaunchConfiguration("driver_backend")
     habitat_socket_path = LaunchConfiguration("habitat_socket_path")
     publish_hz = LaunchConfiguration("publish_hz")
+    use_privileged_map = LaunchConfiguration("use_privileged_map")
+    navigation_mode = LaunchConfiguration("navigation_mode")
+    frontier_detection_radius = LaunchConfiguration("frontier_detection_radius")
+    publish_debug_topics = LaunchConfiguration("publish_debug_topics")
 
     bridge_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
@@ -36,6 +41,10 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("driver_backend", default_value="habitat"),
         DeclareLaunchArgument("habitat_socket_path", default_value="/tmp/habitat_engine.sock"),
         DeclareLaunchArgument("publish_hz", default_value="15.0"),
+        DeclareLaunchArgument("use_privileged_map", default_value="false"),
+        DeclareLaunchArgument("navigation_mode", default_value="nav2"),
+        DeclareLaunchArgument("frontier_detection_radius", default_value="5.0"),
+        DeclareLaunchArgument("publish_debug_topics", default_value="false"),
 
         bridge_launch,
 
@@ -43,34 +52,13 @@ def generate_launch_description() -> LaunchDescription:
             package="explorer_bridge",
             executable="habitat_map_node",
             name="habitat_map_node",
+            condition=IfCondition(use_privileged_map),
             parameters=[{
                 "habitat_socket_path": habitat_socket_path,
                 "grid_topic": grid_topic,
                 "map_frame": map_frame,
                 "publish_hz": 1.0,
             }],
-            output="screen",
-        ),
-        Node(
-            package="explorer_mission",
-            executable="frontiers_node",
-            name="frontiers",
-            parameters=[{
-                "map_frame": map_frame,
-                "base_frame": base_frame,
-                "grid_topic": grid_topic,
-                "min_radius_m": 0.5,
-                "max_radius_m": 15.0,
-                "max_frontiers": 8,
-                "min_contour_pixels": 15,
-            }],
-            output="screen",
-        ),
-        Node(
-            package="explorer_mission",
-            executable="graph_node",
-            name="graph_node",
-            parameters=[{"frame_id": map_frame}],
             output="screen",
         ),
         Node(
@@ -98,6 +86,9 @@ def generate_launch_description() -> LaunchDescription:
             parameters=[{
                 "map_frame": map_frame,
                 "base_frame": base_frame,
+                "navigation_mode": navigation_mode,
+                "frontier_detection_radius": frontier_detection_radius,
+                "publish_debug_topics": publish_debug_topics,
             }],
             output="screen",
         ),

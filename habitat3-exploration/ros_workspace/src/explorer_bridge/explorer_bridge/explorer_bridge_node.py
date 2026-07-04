@@ -64,8 +64,10 @@ class ExplorerBridgeNode(Node):
         self.declare_parameter("action_name", "/movement/discrete_move")
         self.declare_parameter("publish_odom", True)
         self.declare_parameter("map_frame", "map")
+        self.declare_parameter("odom_frame", "odom")
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("odom_topic", "/odom")
+        self.declare_parameter("depth_frame", "depth_frame")
 
         backend = self.get_parameter("driver_backend").get_parameter_value().string_value
         socket_path = self.get_parameter("habitat_socket_path").get_parameter_value().string_value
@@ -102,7 +104,10 @@ class ExplorerBridgeNode(Node):
         )
 
         self._map_frame = self.get_parameter("map_frame").get_parameter_value().string_value
+        self._odom_frame = self.get_parameter("odom_frame").get_parameter_value().string_value
         self._base_frame = self.get_parameter("base_frame").get_parameter_value().string_value
+        self._depth_frame = self.get_parameter("depth_frame").get_parameter_value().string_value
+        self._odom_origin: tuple[float, float, float] | None = None
         publish_odom = self.get_parameter("publish_odom").get_parameter_value().bool_value
         if publish_odom:
             odom_topic = self.get_parameter("odom_topic").get_parameter_value().string_value
@@ -145,8 +150,9 @@ class ExplorerBridgeNode(Node):
         header = Header(stamp=stamp, frame_id="camera")
 
         self._rgb_pub.publish(rgb_array_to_image(obs.rgb, header=header, frame_id="camera"))
+        depth_header = Header(stamp=stamp, frame_id=self._depth_frame)
         self._depth_pub.publish(
-            depth_array_to_image(obs.depth, header=header, frame_id="lidar_depth")
+            depth_array_to_image(obs.depth, header=depth_header, frame_id=self._depth_frame)
         )
 
         if obs.birdseye is not None:
@@ -173,6 +179,24 @@ class ExplorerBridgeNode(Node):
         q.w = math.cos(yaw_rad / 2.0)
         return q
 
+    def _habitat_pose_to_odom(self, pose) -> tuple[float, float, float]:
+        """Express Habitat ground-truth pose relative to episode start (odom frame)."""
+        if self._odom_origin is None:
+            self._odom_origin = (pose.x, pose.y, pose.yaw_rad)
+        ox, oy, oyaw = self._odom_origin
+        dx = pose.x - ox
+        dy = pose.y - oy
+        cos_y = math.cos(-oyaw)
+        sin_y = math.sin(-oyaw)
+        odom_x = cos_y * dx - sin_y * dy
+        odom_y = sin_y * dx + cos_y * dy
+        odom_yaw = pose.yaw_rad - oyaw
+        while odom_yaw > math.pi:
+            odom_yaw -= 2.0 * math.pi
+        while odom_yaw < -math.pi:
+            odom_yaw += 2.0 * math.pi
+        return odom_x, odom_y, odom_yaw
+
     def _publish_odom_tf(self) -> None:
         if not self._driver_ready:
             return
@@ -182,22 +206,23 @@ class ExplorerBridgeNode(Node):
             self.get_logger().debug(f"get_pose failed: {exc}")
             return
 
+        odom_x, odom_y, odom_yaw = self._habitat_pose_to_odom(pose)
         stamp = self.get_clock().now().to_msg()
         odom = Odometry()
         odom.header.stamp = stamp
-        odom.header.frame_id = self._map_frame
+        odom.header.frame_id = self._odom_frame
         odom.child_frame_id = self._base_frame
-        odom.pose.pose.position.x = pose.x
-        odom.pose.pose.position.y = pose.y
-        odom.pose.pose.orientation = self._yaw_to_quaternion(pose.yaw_rad)
+        odom.pose.pose.position.x = odom_x
+        odom.pose.pose.position.y = odom_y
+        odom.pose.pose.orientation = self._yaw_to_quaternion(odom_yaw)
         self._odom_pub.publish(odom)
 
         tf_msg = TransformStamped()
         tf_msg.header.stamp = stamp
-        tf_msg.header.frame_id = self._map_frame
+        tf_msg.header.frame_id = self._odom_frame
         tf_msg.child_frame_id = self._base_frame
-        tf_msg.transform.translation.x = pose.x
-        tf_msg.transform.translation.y = pose.y
+        tf_msg.transform.translation.x = odom_x
+        tf_msg.transform.translation.y = odom_y
         tf_msg.transform.rotation = odom.pose.pose.orientation
         self._tf_broadcaster.sendTransform(tf_msg)
 
@@ -221,6 +246,8 @@ class ExplorerBridgeNode(Node):
             collided = collided or step_result.collided
             feedback.steps_completed = completed
             goal_handle.publish_feedback(feedback)
+            if hasattr(self, "_odom_pub"):
+                self._publish_odom_tf()
 
         result.success = True
         result.collided = collided

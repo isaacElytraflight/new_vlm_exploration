@@ -12,21 +12,20 @@ find_package(rclcpp_action REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(nav_msgs REQUIRED)
-find_package(map_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
-find_package(visualization_msgs REQUIRED)
-find_package(std_srvs REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(explorer_msgs REQUIRED)
+find_package(nav2_msgs REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
 find_package(OpenCV REQUIRED)
-find_package(Boost REQUIRED)
 
 include_directories(include)
 
 set(EXPLORER_MISSION_LIBS
   frontier_detection
-  graph_logic
+  frontier_tree
   discrete_navigator
   nav2_navigator
 )
@@ -38,12 +37,12 @@ target_include_directories(frontier_detection PUBLIC
 ament_target_dependencies(frontier_detection nav_msgs geometry_msgs)
 target_link_libraries(frontier_detection ${OpenCV_LIBS})
 
-add_library(graph_logic src/graph_logic.cpp)
-target_include_directories(graph_logic PUBLIC
+add_library(frontier_tree src/frontier_tree.cpp)
+target_include_directories(frontier_tree PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
-ament_target_dependencies(graph_logic nav_msgs geometry_msgs)
-target_link_libraries(graph_logic Boost::boost)
+ament_target_dependencies(frontier_tree explorer_msgs geometry_msgs)
+target_link_libraries(frontier_tree ${OpenCV_LIBS})
 
 add_library(discrete_navigator src/discrete_navigator.cpp)
 target_include_directories(discrete_navigator PUBLIC
@@ -54,25 +53,14 @@ add_library(nav2_navigator src/nav2_navigator.cpp)
 target_include_directories(nav2_navigator PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
+ament_target_dependencies(nav2_navigator
+  rclcpp rclcpp_action nav2_msgs tf2_geometry_msgs)
 
 set(node_targets
-  frontiers_node
-  graph_node
   actions_node
   frontier_vlm_client_node
   explore_node
 )
-
-add_executable(frontiers_node src/frontiers_node.cpp)
-target_link_libraries(frontiers_node frontier_detection)
-ament_target_dependencies(frontiers_node
-  rclcpp tf2_ros nav_msgs map_msgs geometry_msgs explorer_msgs)
-target_link_libraries(frontiers_node ${OpenCV_LIBS})
-
-add_executable(graph_node src/graph_node.cpp)
-target_link_libraries(graph_node graph_logic)
-ament_target_dependencies(graph_node
-  rclcpp nav_msgs visualization_msgs std_srvs geometry_msgs explorer_msgs)
 
 add_executable(actions_node src/actions_node.cpp)
 ament_target_dependencies(actions_node
@@ -84,9 +72,10 @@ ament_target_dependencies(frontier_vlm_client_node
   rclcpp rclcpp_action sensor_msgs std_msgs explorer_msgs)
 
 add_executable(explore_node src/explore_node.cpp)
-target_link_libraries(explore_node frontier_detection discrete_navigator)
+target_link_libraries(explore_node frontier_detection frontier_tree discrete_navigator nav2_navigator)
 ament_target_dependencies(explore_node
-  rclcpp rclcpp_action tf2_ros nav_msgs sensor_msgs std_msgs geometry_msgs explorer_msgs)
+  rclcpp rclcpp_action tf2_ros nav_msgs sensor_msgs std_msgs geometry_msgs
+  diagnostic_msgs explorer_msgs)
 
 install(TARGETS
   ${EXPLORER_MISSION_LIBS}
@@ -97,9 +86,6 @@ install(TARGETS
 install(TARGETS ${node_targets}
   DESTINATION lib/${PROJECT_NAME})
 
-# Python mission nodes. ament_python_install_package() installs the package
-# modules but does NOT process setup.py console_scripts, so install the node
-# entrypoints as executables here (renamed to match launch executable names).
 install(PROGRAMS
   explorer_mission/maprender_node.py
   DESTINATION lib/${PROJECT_NAME}
@@ -116,6 +102,9 @@ install(DIRECTORY include/
 install(DIRECTORY launch/
   DESTINATION share/${PROJECT_NAME}/launch)
 
+install(DIRECTORY config/
+  DESTINATION share/${PROJECT_NAME}/config)
+
 ament_python_install_package(${PROJECT_NAME})
 
 if(BUILD_TESTING)
@@ -129,10 +118,10 @@ if(BUILD_TESTING)
   target_include_directories(test_frontier_detection PUBLIC include)
   ament_target_dependencies(test_frontier_detection nav_msgs geometry_msgs)
 
-  ament_add_gtest(test_graph_logic test/test_graph_logic.cpp)
-  target_link_libraries(test_graph_logic graph_logic)
-  target_include_directories(test_graph_logic PUBLIC include)
-  ament_target_dependencies(test_graph_logic nav_msgs geometry_msgs)
+  ament_add_gtest(test_frontier_tree test/test_frontier_tree.cpp)
+  target_link_libraries(test_frontier_tree frontier_tree)
+  target_include_directories(test_frontier_tree PUBLIC include)
+  ament_target_dependencies(test_frontier_tree explorer_msgs geometry_msgs)
 
   ament_add_gtest(test_discrete_navigator test/test_discrete_navigator.cpp)
   target_link_libraries(test_discrete_navigator discrete_navigator)

@@ -1,3 +1,3 @@
 std_msgs/Header header
-sensor_msgs/CompressedImage[] images
 uint32[] frontier_ids
+uint8[] scores

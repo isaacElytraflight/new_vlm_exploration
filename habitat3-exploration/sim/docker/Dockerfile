@@ -30,6 +30,12 @@ RUN apt-get update && apt-get install -y software-properties-common && \
       ros-jazzy-image-transport \
       ros-jazzy-map-msgs \
       ros-jazzy-ament-cmake-gtest \
+      ros-jazzy-navigation2 \
+      ros-jazzy-nav2-bringup \
+      ros-jazzy-slam-toolbox \
+      ros-jazzy-depthimage-to-laserscan \
+      ros-jazzy-laser-geometry \
+      ros-jazzy-tf2-geometry-msgs \
       python3-colcon-common-extensions \
       python3-empy \
       libopencv-dev \

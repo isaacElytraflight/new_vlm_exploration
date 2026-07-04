@@ -79,3 +79,7 @@ views:
     label: Grid Map
     type: ros-compressed
     topic: /map_renderer/map_img
+  - id: nav-plan-map
+    label: Nav Plan (Bird's Eye)
+    type: ros-compressed
+    topic: /map_renderer/map_img

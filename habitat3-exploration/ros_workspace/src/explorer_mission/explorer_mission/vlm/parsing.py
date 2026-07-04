@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import re
 
 from sensor_msgs.msg import CompressedImage
@@ -20,6 +21,20 @@ def parse_leading_int(s: str) -> int:
     if not match:
         raise ValueError(f"No integer found in VLM response: {s!r}")
     return int(match.group(1))
+
+
+def parse_openness_score(s: str) -> int:
+    """Parse a 0-5 openness score from JSON or plain text VLM output."""
+    text = s.strip()
+    try:
+        payload = json.loads(text)
+        if isinstance(payload, dict) and "score" in payload:
+            score = int(payload["score"])
+            return max(0, min(5, score))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+    score = parse_leading_int(text)
+    return max(0, min(5, score))
 
 
 def validate_frontier_choice(chosen: int, candidate_ids: list[int]) -> int:

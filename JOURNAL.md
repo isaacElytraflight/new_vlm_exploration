@@ -6,6 +6,68 @@ Add a new dated section at the top when you work on this repo.
 
 ---
 
+## 2026-07-03 — Nav2 + SLAM sim-to-real mapping, frontier decision tree restructure
+
+### Goals
+1. Replace privileged Habitat pathfinder map with **sensor-driven SLAM** (`depth → /scan → slam_toolbox → /grid_map`) and **Nav2** obstacle-aware navigation (port of ROS 1 `move_base` stack).
+2. Replace continuous frontier filtering + VLM frontier **selection** + graph/Dijkstra backtrack with a **global frontier decision tree**: on-demand OpenCV detection at leaf nodes, parallel VLM **openness** ratings (0–5), DFS that prefers **lowest** score first, in-place termination when the tree is exhausted.
+
+### What we built
+
+**Nav2 + SLAM pipeline**
+- Default launch: `nav2_exploration.launch.py` (includes `exploration.launch.py` + Nav2 + slam_toolbox + depthimage_to_laserscan).
+- `explorer_bridge`: `odom → base_link` TF (SLAM publishes `map → odom`); optional privileged `habitat_map_node` gated by `use_privileged_map:=false` default.
+- `cmd_vel_to_discrete_node.py` — `/cmd_vel` → `/movement/discrete_move` (ROS 1 `cmd_vel_to_actions` port).
+- `Nav2Navigator` + `explore_node` `navigation_mode:=nav2|discrete`.
+- Docker: Nav2 + slam_toolbox packages; `config/nav2_params.yaml`, `config/slam_toolbox.yaml`.
+- Elytra: real-time motion toggle, Nav2 plan overlay view (`nav-plan-map`).
+
+**Frontier decision tree (replaces old frontier/graph stack)**
+- **`FrontierTree` library** — `createRoot`, `addChild`, `selectNextChild` (lowest openness, random tie), `hasUnexploredNodesExcluding` (in-place termination), `markFullyExplored` (score 0 → explored immediately).
+- **`explore_node` rewrite** — loop: rotate360 → detect at leaf only (exclusion mask around all tree nodes + radius filter) → parallel VLM rate → navigate lowest-score child or backtrack to parent.
+- **Removed:** `frontiers_node`, `graph_node`, `graph_logic`, blacklist, `chosen_frontier`, `FrontierViewsProcess` / `vlm/query`.
+- **VLM:** `vlm/rate_frontiers` (`RateFrontierOpenness` action); parallel Ollama HTTP per image; JSON `parse_openness_score()`; no grid map in prompt.
+- **ROS topic contract (tiered):**
+  - Tier 1: `exploration/frontier_tree`, `exploration/status` (latched)
+  - Tier 2: `exploration/vlm/views`, `exploration/vlm/scores`
+  - Tier 3 (optional): `exploration/debug/events`, `exploration/debug/last_vlm_batch` via `publish_debug_topics:=true`
+- **`maprender_node`:** subscribes `/exploration/frontier_tree`; labels nodes with VLM score 0–5; dropped unused `map_img_raw`.
+
+**New messages**
+- `FrontierTree`, `FrontierTreeNode`, `FrontierOpennessScores`, `ExplorationStatus`, `RateFrontierOpenness.action`
+- `FrontierViews.frontier_ids` is now `uint32[]` (tree node IDs)
+
+### Problems & fixes
+
+| Problem | Root cause | Fix |
+|--------|------------|-----|
+| `selectNextChild` picked wrong child | `addChild` held stale `parent*` after `vector` reallocation | Re-`find(parent_id)` after `push_back` |
+| colcon build failed on `nav2_msgs` | Missing `find_package(nav2_msgs)` + Nav2 not in container image | Added CMake deps; `apt install ros-jazzy-navigation2` in dev container |
+| `Nav2Navigator` incomplete type errors | Forward-declared `NavigateToPose` in header | Full `#include <nav2_msgs/action/navigate_to_pose.hpp>` |
+
+### Verified
+- **colcon test** `explorer_mission`: 24/24 gtests pass (frontier detection mask, frontier tree, harness).
+- **pytest** `test_py/`: 31/31 pass (including `parse_openness_score`).
+- **Elytra** backend: 18/18 Node tests pass.
+- Container `colcon build --packages-select explorer_msgs explorer_mission` succeeds after Nav2 packages installed.
+
+### Key files
+- `explorer_mission/src/explore_node.cpp` — tree exploration loop
+- `explorer_mission/src/frontier_tree.cpp`, `include/explorer_mission/frontier_tree.hpp`
+- `explorer_mission/src/frontier_detection.cpp` — `buildExclusionMask`, `filterContoursNearRobot`
+- `explorer_mission/explorer_mission/vlm/vlm_node.py` — parallel openness rating
+- `explorer_mission/launch/nav2_exploration.launch.py`, `launch/exploration.launch.py`
+- `explorer_bridge/cmd_vel_to_discrete_node.py`, `depth_camera_info_node.py`
+- `ros_workspace/design_doc.md` — tiered ROS topic contract
+
+### Ops notes
+- Rebuild in container after pull: `colcon build --packages-select explorer_msgs explorer_mission`
+- Launch episode via Elytra Connect → Run Exploration Episode (`start_sim.sh` uses `nav2_exploration.launch.py`).
+- Debug: `ros2 topic echo /exploration/status`, `/exploration/frontier_tree`
+- Params: `frontier_detection_radius` (default 5.0 m), `publish_debug_topics` (default false)
+
+---
+
 ## 2026-07-01 — Local Ollama VLM, multi-panel sim views, frontier pipeline fixes
 
 ### Goal

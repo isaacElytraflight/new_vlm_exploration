@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render occupancy grid with graph, trajectory, and frontier overlays."""
+"""Render occupancy grid with frontier tree, trajectory, and plan overlays."""
 
 from __future__ import annotations
 
@@ -10,12 +10,15 @@ import cv2
 import numpy as np
 import rclpy
 from geometry_msgs.msg import TransformStamped
-from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import OccupancyGrid, Path
 from rclpy.node import Node
-from sensor_msgs.msg import CompressedImage, Image
+from rclpy.qos import DurabilityPolicy, QoSProfile
+from sensor_msgs.msg import CompressedImage
 import tf2_ros
 
-from explorer_msgs.msg import FrontierArray, Graph
+from explorer_msgs.msg import FrontierTree
+
+NOT_RATED = 255
 
 
 class MapRenderNode(Node):
@@ -26,30 +29,28 @@ class MapRenderNode(Node):
         self.map_arr: np.ndarray | None = None
         self.map_res: float | None = None
         self.map_origin: tuple[float, float] | None = None
-        self.graph_msg: Graph | None = None
-        self.graph_vertices = None
-        self.frontiers_msg: FrontierArray | None = None
+        self.tree_msg: FrontierTree | None = None
+        self.global_plan: Path | None = None
+        self.local_plan: Path | None = None
         self.trajectory: list[tuple[dict, float]] = []
         self.map_lock = Lock()
 
         self.pub = self.create_publisher(CompressedImage, "map_renderer/map_img", 1)
-        self.pub_raw = self.create_publisher(Image, "map_renderer/map_img_raw", 1)
 
         self.map_sub = self.create_subscription(
             OccupancyGrid, "/grid_map", self.map_cb, 1)
-        self.graph_sub = self.create_subscription(
-            Graph, "/graph_node/graph", self.graph_cb, 1)
-        self.frontier_sub = self.create_subscription(
-            FrontierArray, "/frontiers/filtered_frontiers", self.frontier_cb, 1)
+        tree_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.tree_sub = self.create_subscription(
+            FrontierTree, "/exploration/frontier_tree", self.tree_cb, tree_qos)
+        self.global_plan_sub = self.create_subscription(
+            Path, "/plan", self.global_plan_cb, 1)
+        self.local_plan_sub = self.create_subscription(
+            Path, "/local_plan", self.local_plan_cb, 1)
 
         self.target_frame = "map"
         self.source_frame = "base_link"
         self.tf_buffer = tf2_ros.Buffer(cache_time=rclpy.duration.Duration(seconds=10.0))
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
-
-        self._graph_render_throttle_s = self.declare_parameter(
-            "graph_render_throttle_s", 5.0).value
-        self._last_graph_render_time = 0.0
 
         rate_hz = self.declare_parameter("rate_hz", 1.0).value
         period = 1.0 / max(rate_hz, 1e-6)
@@ -67,16 +68,18 @@ class MapRenderNode(Node):
         if first_map:
             self.render_and_publish()
 
-    def graph_cb(self, msg: Graph) -> None:
-        self.graph_msg = msg
-        self.graph_vertices = msg.vertices
-        now = self.get_clock().now().nanoseconds / 1e9
-        if self.map_arr is not None and (now - self._last_graph_render_time) >= self._graph_render_throttle_s:
-            self._last_graph_render_time = now
+    def tree_cb(self, msg: FrontierTree) -> None:
+        self.tree_msg = msg
+        if self.map_arr is not None:
             self.render_and_publish()
 
-    def frontier_cb(self, msg: FrontierArray) -> None:
-        self.frontiers_msg = msg
+    def global_plan_cb(self, msg: Path) -> None:
+        self.global_plan = msg
+        if self.map_arr is not None:
+            self.render_and_publish()
+
+    def local_plan_cb(self, msg: Path) -> None:
+        self.local_plan = msg
         if self.map_arr is not None:
             self.render_and_publish()
 
@@ -92,15 +95,19 @@ class MapRenderNode(Node):
             1.0 - 2.0 * (q.y * q.y + q.z * q.z))
         return x, y, math.degrees(yaw)
 
-    def overlay_graph_on_occupancy_map(
+    def overlay_map(
         self,
         robot_color=(0, 0, 255),
         arrow_color=(0, 165, 255),
-        vertex_color=(0, 255, 0),
+        node_color=(0, 255, 0),
+        current_node_color=(255, 128, 0),
+        explored_color=(128, 128, 128),
         trajectory_color=(200, 0, 0),
-        frontier_outline_color=(0, 255, 255),
-        frontier_label_color=(255, 0, 255),
-        vertex_radius=3,
+        label_color=(255, 0, 255),
+        global_plan_color=(255, 165, 0),
+        local_plan_color=(255, 255, 0),
+        node_radius=4,
+        current_node_radius=6,
         robot_radius=3,
         arrow_len_m=0.5,
         crop_margin_px=10,
@@ -125,36 +132,41 @@ class MapRenderNode(Node):
             col = w - 1 - col
             return col, row
 
-        def grid_pixel_to_flipped_pixel(px, py):
-            # frontier.points store OpenCV grid indices (col=x, row=y), not world coords
-            col = w - 1 - int(round(px))
-            row = int(round(py))
-            return col, row
-
         font = cv2.FONT_HERSHEY_SIMPLEX
-        if self.frontiers_msg and getattr(self.frontiers_msg, "frontiers", None):
-            for frontier in self.frontiers_msg.frontiers:
-                pts = np.array([
-                    [grid_pixel_to_flipped_pixel(p.x, p.y)]
-                    for p in frontier.points
-                ], dtype=np.int32)
-                cv2.drawContours(color, [pts], -1, frontier_outline_color, 1)
-                px, py = world_to_flipped_pixel(frontier.midpoint.x, frontier.midpoint.y)
-                label_id = frontier.id
-                cv2.putText(color, str(label_id), (px - 2, py + 2), font, 0.4, (0, 0, 0), 2, cv2.LINE_AA)
-                cv2.putText(
-                    color, str(label_id), (px - 2, py + 2), font, 0.4,
-                    frontier_label_color, 1, cv2.LINE_AA)
+        current_id = self.tree_msg.current_node_id if self.tree_msg else 0
+        if self.tree_msg and self.tree_msg.nodes:
+            for node in self.tree_msg.nodes:
+                px, py = world_to_flipped_pixel(node.position.x, node.position.y)
+                if node.fully_explored:
+                    dot_color = explored_color
+                elif node.id == current_id:
+                    dot_color = current_node_color
+                else:
+                    dot_color = node_color
+                radius = current_node_radius if node.id == current_id else node_radius
+                cv2.circle(color, (px, py), radius, dot_color, -1)
+                if node.openness_score != NOT_RATED:
+                    label = str(node.openness_score)
+                    cv2.putText(color, label, (px - 2, py + 2), font, 0.4, (0, 0, 0), 2, cv2.LINE_AA)
+                    cv2.putText(color, label, (px - 2, py + 2), font, 0.4, label_color, 1, cv2.LINE_AA)
 
         if len(self.trajectory) > 1:
             pixel_points = [world_to_flipped_pixel(pos["x"], pos["y"]) for pos, _yaw in self.trajectory]
             pts = np.array(pixel_points, np.int32).reshape((-1, 1, 2))
             cv2.polylines(color, [pts], isClosed=False, color=trajectory_color, thickness=2)
 
-        if self.graph_msg is not None and self.graph_vertices is not None:
-            for v_node in self.graph_vertices:
-                vx, vy = world_to_flipped_pixel(v_node.x, v_node.y)
-                cv2.circle(color, (vx, vy), vertex_radius, vertex_color, -1)
+        def draw_path(path_msg: Path | None, plan_color) -> None:
+            if path_msg is None or len(path_msg.poses) < 2:
+                return
+            pixel_points = [
+                world_to_flipped_pixel(p.pose.position.x, p.pose.position.y)
+                for p in path_msg.poses
+            ]
+            pts = np.array(pixel_points, np.int32).reshape((-1, 1, 2))
+            cv2.polylines(color, [pts], isClosed=False, color=plan_color, thickness=2)
+
+        draw_path(self.global_plan, global_plan_color)
+        draw_path(self.local_plan, local_plan_color)
 
         rpx, rpy = world_to_flipped_pixel(robot_x, robot_y)
         cv2.circle(color, (rpx, rpy), robot_radius, robot_color, -1)
@@ -185,7 +197,9 @@ class MapRenderNode(Node):
         if self.map_arr is None:
             return
         try:
-            color = self.overlay_graph_on_occupancy_map()
+            x, y, yaw = self.get_pose()
+            self.trajectory.append(({"x": x, "y": y}, yaw))
+            color = self.overlay_map()
         except Exception as exc:
             self.get_logger().warn(f"Render failed: {exc}")
             return
@@ -200,19 +214,6 @@ class MapRenderNode(Node):
             msg.header = self.map_msg.header
         msg.format = "png"
         msg.data = buf.tobytes()
-
-        msg_raw = Image()
-        msg_raw.header.stamp = self.get_clock().now().to_msg()
-        msg_raw.header.frame_id = "map"
-        color = np.ascontiguousarray(color)
-        msg_raw.height = color.shape[0]
-        msg_raw.width = color.shape[1]
-        msg_raw.encoding = "bgr8"
-        msg_raw.is_bigendian = False
-        msg_raw.step = color.shape[1] * color.shape[2] * color.dtype.itemsize
-        msg_raw.data = color.tobytes()
-
-        self.pub_raw.publish(msg_raw)
         self.pub.publish(msg)
 
     def tick(self) -> None:

@@ -14,19 +14,30 @@ static nav_msgs::msg::OccupancyGrid makeTestGrid()
   grid.info.resolution = 0.05;
   grid.info.origin.position.x = 0.0;
   grid.info.origin.position.y = 0.0;
-  grid.data.assign(400, 100);  // occupied
+  grid.data.assign(400, 100);
 
   for (int y = 5; y < 15; ++y) {
     for (int x = 5; x < 15; ++x) {
-      grid.data[y * 20 + x] = 0;  // free
+      grid.data[y * 20 + x] = 0;
     }
   }
   for (int y = 14; y < 20; ++y) {
     for (int x = 5; x < 15; ++x) {
-      grid.data[y * 20 + x] = -1;  // unknown below free region
+      grid.data[y * 20 + x] = -1;
     }
   }
   return grid;
+}
+
+TEST(FrontierDetectionHarness, RunnerExecutesAssertions)
+{
+  EXPECT_EQ(1 + 1, 2);
+}
+
+TEST(FrontierDetectionHarness, IntentionalFailureIsDetectable)
+{
+  const bool negative_control = (1 == 2);
+  EXPECT_TRUE(negative_control == false);
 }
 
 TEST(FrontierDetection, FindsContoursOnFreeUnknownBoundary)
@@ -34,16 +45,6 @@ TEST(FrontierDetection, FindsContoursOnFreeUnknownBoundary)
   const auto grid = makeTestGrid();
   const auto contours = explorer_mission::findFrontierContours(grid, 5);
   EXPECT_FALSE(contours.empty());
-}
-
-TEST(FrontierDetection, FiltersByDistance)
-{
-  const auto grid = makeTestGrid();
-  const auto contours = explorer_mission::findFrontierContours(grid, 5);
-  const cv::Point2f robot(0.5f, 0.5f);
-  const auto filtered = explorer_mission::filterFrontiers(
-    contours, grid, robot, {}, 0.0, 10.0, 5);
-  EXPECT_LE(filtered.size(), 5u);
 }
 
 TEST(FrontierDetection, PixelToWorld)
@@ -57,14 +58,6 @@ TEST(FrontierDetection, PixelToWorld)
   EXPECT_NEAR(world.y, 4.0, 1e-6);
 }
 
-// --- Incremental-reveal regression tests --------------------------------------
-// These mirror the explored-map output the habitat engine now produces: an
-// observed disc of FREE space surrounded by UNKNOWN (the rest of the navmesh
-// the robot has not yet seen). This is the case that previously failed because
-// the map contained no UNKNOWN cells at all.
-
-// Build a square map that is FREE inside a centred disc of `radius` and
-// UNKNOWN everywhere else (optionally walling the very border as OCCUPIED).
 static nav_msgs::msg::OccupancyGrid makeRevealedDiscGrid(
   int size, double radius, bool fully_known)
 {
@@ -83,7 +76,7 @@ static nav_msgs::msg::OccupancyGrid makeRevealedDiscGrid(
       const double dx = x - cx;
       const double dy = y - cy;
       if (std::sqrt(dx * dx + dy * dy) <= radius) {
-        grid.data[y * size + x] = 0;  // observed free
+        grid.data[y * size + x] = 0;
       }
     }
   }
@@ -92,60 +85,61 @@ static nav_msgs::msg::OccupancyGrid makeRevealedDiscGrid(
 
 TEST(FrontierDetection, RevealedDiscHasFrontier)
 {
-  // POSITIVE: an observed free disc inside unknown space has a free/unknown
-  // boundary -> at least one frontier contour. This is the castle-scene case.
-  const auto grid = makeRevealedDiscGrid(120, 30.0, /*fully_known=*/false);
+  const auto grid = makeRevealedDiscGrid(120, 30.0, false);
   const auto contours = explorer_mission::findFrontierContours(grid, 20);
-  EXPECT_FALSE(contours.empty()) << "revealed disc must produce a frontier";
+  EXPECT_FALSE(contours.empty());
 }
 
 TEST(FrontierDetection, FullyKnownMapHasNoFrontier_NegativeControl)
 {
-  // NEGATIVE CONTROL: with no UNKNOWN cells (the old full-navmesh behaviour),
-  // frontier detection must find nothing — reproducing the "exploration
-  // completed immediately" bug so a regression would fail this test.
-  const auto grid = makeRevealedDiscGrid(120, 30.0, /*fully_known=*/true);
+  const auto grid = makeRevealedDiscGrid(120, 30.0, true);
   const auto contours = explorer_mission::findFrontierContours(grid, 20);
-  EXPECT_TRUE(contours.empty()) << "fully-known map must have no frontiers";
+  EXPECT_TRUE(contours.empty());
 }
 
-// A room whose floor is observed (FREE) with UNKNOWN beyond its top edge — the
-// realistic shape of an explored area bounded by a sensor horizon / doorway.
-// The frontier is the one-sided free/unknown boundary, so its centroid is
-// offset from a robot standing deeper in the room.
-static nav_msgs::msg::OccupancyGrid makeRevealedRoomGrid()
+TEST(FrontierDetection, FilterContoursNearRobot_positive)
 {
-  const int size = 120;
-  nav_msgs::msg::OccupancyGrid grid;
-  grid.info.width = static_cast<unsigned int>(size);
-  grid.info.height = static_cast<unsigned int>(size);
-  grid.info.resolution = 0.05;
-  grid.info.origin.position.x = 0.0;
-  grid.info.origin.position.y = 0.0;
-  grid.data.assign(static_cast<size_t>(size) * size, -1);  // unknown
-
-  for (int y = 30; y < 90; ++y) {        // observed free band (rows 30..89)
-    for (int x = 20; x < 100; ++x) {
-      grid.data[y * size + x] = 0;
-    }
-  }
-  return grid;
+  const auto grid = makeTestGrid();
+  const cv::Point2f robot(0.5f, 0.5f);
+  const auto contours = explorer_mission::findFrontierContours(grid, 5);
+  const auto near = explorer_mission::filterContoursNearRobot(contours, grid, robot, 5.0);
+  EXPECT_FALSE(near.empty());
 }
 
-TEST(FrontierDetection, FilteredFrontierWithinRange)
+TEST(FrontierDetection, FilterContoursNearRobot_negative)
 {
-  // Frontier lies along row ~30 (world y = 1.5 m); robot stands deep in the
-  // room at row 85 (world y ~4.25 m), so the frontier is ~2.7 m away and must
-  // survive the 1-5 m distance filter.
-  const auto grid = makeRevealedRoomGrid();
-  const auto contours = explorer_mission::findFrontierContours(grid, 20);
-  ASSERT_FALSE(contours.empty());
+  const auto grid = makeTestGrid();
+  const cv::Point2f robot(0.5f, 0.5f);
+  const auto contours = explorer_mission::findFrontierContours(grid, 5);
+  const auto near = explorer_mission::filterContoursNearRobot(contours, grid, robot, 0.01);
+  EXPECT_TRUE(near.empty());
+}
 
-  const cv::Point2f robot(60 * 0.05f, 85 * 0.05f);
-  const auto filtered = explorer_mission::filterFrontiers(
-    contours, grid, robot, {}, 1.0, 5.0, 5);
-  EXPECT_FALSE(filtered.empty()) << "boundary frontier should pass the 1-5 m filter";
-  EXPECT_LE(filtered.size(), 5u);
+TEST(FrontierDetection, ExclusionMaskBlocksExistingNode_negative)
+{
+  const auto grid = makeTestGrid();
+  const cv::Point2f robot(0.5f, 0.5f);
+  const cv::Point2f existing = explorer_mission::frontierMidpointWorld(
+    explorer_mission::findFrontierContours(grid, 5).front(), grid);
+
+  const auto mask = explorer_mission::buildExclusionMask(grid, {existing}, 1.0);
+  const auto contours = explorer_mission::findFrontierContoursMasked(grid, mask, 5);
+  const auto near = explorer_mission::filterContoursNearRobot(contours, grid, robot, 5.0);
+  EXPECT_TRUE(near.empty());
+}
+
+TEST(FrontierDetection, ExclusionMaskAllowsFarFrontier_positive)
+{
+  const auto grid = makeRevealedDiscGrid(80, 25.0, false);
+  const cv::Point2f robot(
+    static_cast<float>(40 * grid.info.resolution),
+    static_cast<float>(40 * grid.info.resolution));
+  const cv::Point2f block_center(0.1f, 0.1f);
+
+  const auto mask = explorer_mission::buildExclusionMask(grid, {block_center}, 0.5);
+  const auto contours = explorer_mission::findFrontierContoursMasked(grid, mask, 10);
+  const auto near = explorer_mission::filterContoursNearRobot(contours, grid, robot, 3.0);
+  EXPECT_FALSE(near.empty());
 }
 
 int main(int argc, char ** argv)

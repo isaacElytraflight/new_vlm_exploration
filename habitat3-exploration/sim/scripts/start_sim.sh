@@ -77,4 +77,4 @@ pkill -f "elytra_view_server.py" 2>/dev/null || true
 ) &
 VIEW_SERVER_PID=$!
 
-exec ros2 launch explorer_mission exploration.launch.py driver_backend:=habitat
+exec ros2 launch explorer_mission nav2_exploration.launch.py driver_backend:=habitat
