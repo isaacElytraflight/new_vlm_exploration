@@ -96,7 +96,7 @@ public:
     RCLCPP_INFO(get_logger(), "Waiting for required action servers...");
 
     if (navigation_mode_ == "nav2" && nav2_navigator_) {
-      if (!nav2_navigator_->waitForServer(std::chrono::seconds(30))) {
+      if (!nav2_navigator_->waitForServer(std::chrono::seconds(90))) {
         RCLCPP_ERROR(get_logger(), "navigate_to_pose action server not available");
         return false;
       }
@@ -110,12 +110,47 @@ public:
       return false;
     }
 
+    RCLCPP_INFO(get_logger(), "Waiting for SLAM (/grid_map + map TF)...");
     const auto start_wait = now();
-    while (rclcpp::ok() && !tf_received_ &&
-      (now() - start_wait).seconds() < 10.0)
+    bool bootstrap_sent = false;
+    while (rclcpp::ok() &&
+      (now() - start_wait).seconds() < 90.0)
     {
       updateRobotPoseFromTf();
-      rclcpp::sleep_for(std::chrono::milliseconds(100));
+      {
+        std::lock_guard<std::mutex> lock(grid_mutex_);
+        if (have_grid_ && tf_received_) {
+          break;
+        }
+      }
+      if (!bootstrap_sent && (now() - start_wait).seconds() > 8.0) {
+        bootstrap_sent = true;
+        DiscreteMove::Goal goal;
+        goal.direction = DiscreteMove::Goal::FORWARD;
+        goal.steps = 2;
+        auto future = discrete_move_client_->async_send_goal(goal);
+        if (future.wait_for(std::chrono::seconds(30)) == std::future_status::ready) {
+          auto handle = future.get();
+          if (handle) {
+            auto result_future = discrete_move_client_->async_get_result(handle);
+            result_future.wait_for(std::chrono::seconds(60));
+          }
+        }
+        RCLCPP_INFO(get_logger(), "Sent SLAM bootstrap forward move");
+      }
+      rclcpp::sleep_for(std::chrono::milliseconds(200));
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(grid_mutex_);
+      if (!have_grid_ || !tf_received_) {
+        RCLCPP_ERROR(
+          get_logger(),
+          "Timed out waiting for SLAM map (/grid_map=%s, map TF=%s)",
+          have_grid_ ? "ok" : "missing",
+          tf_received_ ? "ok" : "missing");
+        return false;
+      }
     }
 
     RCLCPP_INFO(get_logger(), "All dependencies are ready.");

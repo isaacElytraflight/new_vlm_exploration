@@ -113,11 +113,6 @@ class ExplorerBridgeNode(Node):
             odom_topic = self.get_parameter("odom_topic").get_parameter_value().string_value
             self._odom_pub = self.create_publisher(Odometry, odom_topic, 10)
             self._tf_broadcaster = TransformBroadcaster(self)
-            self._odom_timer = self.create_timer(
-                0.1,
-                self._publish_odom_tf,
-                callback_group=self._cb_group,
-            )
 
         self._driver_ready = True
         self.get_logger().info(
@@ -172,6 +167,9 @@ class ExplorerBridgeNode(Node):
         except Exception as exc:
             self.get_logger().debug(f"live frame write skipped: {exc}")
 
+        if hasattr(self, "_odom_pub"):
+            self._publish_odom_tf(stamp)
+
     @staticmethod
     def _yaw_to_quaternion(yaw_rad: float) -> Quaternion:
         q = Quaternion()
@@ -197,7 +195,7 @@ class ExplorerBridgeNode(Node):
             odom_yaw += 2.0 * math.pi
         return odom_x, odom_y, odom_yaw
 
-    def _publish_odom_tf(self) -> None:
+    def _publish_odom_tf(self, stamp=None) -> None:
         if not self._driver_ready:
             return
         try:
@@ -207,7 +205,8 @@ class ExplorerBridgeNode(Node):
             return
 
         odom_x, odom_y, odom_yaw = self._habitat_pose_to_odom(pose)
-        stamp = self.get_clock().now().to_msg()
+        if stamp is None:
+            stamp = self.get_clock().now().to_msg()
         odom = Odometry()
         odom.header.stamp = stamp
         odom.header.frame_id = self._odom_frame
@@ -246,8 +245,8 @@ class ExplorerBridgeNode(Node):
             collided = collided or step_result.collided
             feedback.steps_completed = completed
             goal_handle.publish_feedback(feedback)
-            if hasattr(self, "_odom_pub"):
-                self._publish_odom_tf()
+            # Keep depth/odom stamps aligned after each discrete step (critical during 360° turns).
+            self._publish_sensor_data()
 
         result.success = True
         result.collided = collided

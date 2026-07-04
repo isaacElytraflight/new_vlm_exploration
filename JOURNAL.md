@@ -6,6 +6,80 @@ Add a new dated section at the top when you work on this repo.
 
 ---
 
+## 2026-07-04 — SLAM bootstrap + 360° depth scan fixes (episode runs end-to-end)
+
+### Symptom
+Episode started but laser scan looked broken: ~90° wedges, zero/invalid ranges, unknown patches adjacent to the robot, and the grid map did not update during the initial 360° rotation.
+
+### Root cause chain
+| # | Bug | Effect |
+|---|-----|--------|
+| 1 | `depthimage_to_laserscan` **TRANSIENT_LOCAL** QoS vs slam **VOLATILE** | slam never subscribed → no `map` TF |
+| 2 | `range_max: 3.5` vs Habitat center depth **4–16 m** | all-NaN `/scan` |
+| 3 | Jazzy `async_slam_toolbox_node` not lifecycle-activated | slam ran but ignored `/scan` |
+| 4 | Depth camera at **1.5 m** (horizon band) | sparse/invalid floor returns |
+| 5 | Scan in `depth_frame`, ~90° FOV only | blind sectors → unknown wedges near robot |
+| 6 | Odom updated on turn but depth republished on timer only | pose/scan timestamp mismatch during 360° spin |
+
+### Fixes
+- **Custom scan pipeline**: `depth_to_laserscan_node.py`, `scan_from_depth.py` — SensorDataQoS, floor band (bottom 24 rows), **360-bin** scan in `base_link`, **5 m clear_range** (invalid/>5 m → 5.0, never 0/`inf`).
+- **Camera**: Habitat sensors + static TF → **0.1 m** height, level mount.
+- **SLAM / Nav2**: `LifecycleNode` configure/activate for slam_toolbox; Nav2 delayed 20 s; `max_laser_range: 5.0`.
+- **Bridge sync**: `_publish_sensor_data()` after each discrete move step (depth + odom same stamp).
+- **Episode startup**: `start_sim.sh` colcon build; full Nav2 Jazzy params; VLM client wait (no throw); explore_node SLAM bootstrap + 90 s readiness wait.
+- **Tests**: `test_scan_from_depth.py`, `test_depth_camera_info_sync.py`, `test_depth_scan_range.py`, `verify_exploration_stack.py`.
+
+### Verified (container e2e)
+```
+STACK_OK scan_finite=1440/1440 grid=True map_tf=True   # 360 bins, all finite
+scan: base_link, min≈0.26 m, max=5.0 m, 91 bins with real hits
+All dependencies are ready → Exploration started → Exploration completed (exit 0)
+Managed nodes are active (Nav2)
+13 unit tests pass (positive + negative + harness)
+0 [ERROR] lines in episode log
+```
+
+### Ops
+- **Restart episode** after pull so Habitat reloads 0.1 m camera (`docker compose restart sim` if stale zombies).
+- **Rebuild image** for persistence: `cd habitat3-exploration/sim/docker && docker compose build`.
+- **Ollama**: `ollama pull qwen3-vl:4b-instruct` on host (`host.docker.internal:11434`).
+
+---
+
+## 2026-07-03 — Elytra episode dies immediately after “Run Exploration Episode”
+
+### Symptom
+Press **Run Exploration Episode** → Habitat engine starts (SSD warning + socket line), ROS launch prints two `[launch]` lines, then Elytra session ends with no further output.
+
+### Root causes (stacked)
+| Failure | Effect |
+|--------|--------|
+| `depth_camera_info_node` / bridge executables missing in container install | `ros2 launch` failed early (`executable not found`) → `start_sim.sh` exits |
+| Incomplete `nav2_params.yaml` for Nav2 Jazzy | `collision_monitor`: missing `observation_sources`; `docking_server`: missing `dock_plugins` → lifecycle manager aborted Nav2 |
+| `frontier_vlm_client_node` threw if VLM action server slow | Process SIGABRT on startup |
+| Missing `pyyaml` on system Python | `vlm_node` / `maprender_node` exit immediately |
+| No `colcon build` before launch in `start_sim.sh` | Bind-mounted source changes not installed |
+
+The **SemanticScene SSD warning** (`skokloster-castle.scn`) is benign — engine still listens on `/tmp/habitat_engine.sock`.
+
+### Fixes
+- `start_sim.sh`: `colcon build --packages-select explorer_msgs explorer_bridge explorer_mission` before launch.
+- `config/nav2_params.yaml`: added `smoother_server`, `route_server`, `velocity_smoother`, `collision_monitor`, `docking_server` sections (match Nav2 Jazzy defaults).
+- `frontier_vlm_client_node.cpp`: wait up to 120s for VLM server; drop batches instead of throwing.
+- `explore_node.cpp`: Nav2 action wait extended to 90s.
+- `Dockerfile`: `pip install pyyaml` for ROS Python nodes.
+
+### Verified
+- `bash /workspace/scripts/start_sim.sh` in `habitat3-sim` now passes launch header, starts all nodes, reaches `Exploration started` (session stays alive).
+- Expect TF/`/grid_map` warnings for ~15–20s while slam_toolbox initializes; not a crash.
+
+### Ops
+- **Running container (no rebuild):** `docker exec habitat3-sim pip3 install --break-system-packages pyyaml` once if `vlm_node` dies with `No module named 'yaml'`.
+- **Fresh container:** `docker compose build` from `habitat3-exploration/sim/docker` picks up Dockerfile + params.
+- **Ollama:** host must run `ollama pull qwen3-vl:4b-instruct` (container uses `host.docker.internal:11434`).
+
+---
+
 ## 2026-07-03 — Nav2 + SLAM sim-to-real mapping, frontier decision tree restructure
 
 ### Goals

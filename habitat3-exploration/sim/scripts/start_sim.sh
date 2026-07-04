@@ -71,6 +71,13 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/bin:/opt/ros/jazzy/bin
 source /opt/ros/jazzy/setup.bash
 source /opt/explorer_workspace/ros_workspace/install/setup.bash
 
+# Rebuild mission packages so bind-mounted source changes are installed before launch.
+cd /opt/explorer_workspace/ros_workspace
+colcon build --packages-select explorer_msgs explorer_bridge explorer_mission --symlink-install \
+  2>&1 | tail -n 20
+source install/setup.bash
+cd - >/dev/null
+
 pkill -f "elytra_view_server.py" 2>/dev/null || true
 (
   exec python3 /opt/elytra/elytra_view_server.py

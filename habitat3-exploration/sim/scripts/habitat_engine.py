@@ -58,13 +58,13 @@ def make_sim() -> habitat_sim.Simulator:
     rgb.uuid = "rgb"
     rgb.sensor_type = habitat_sim.SensorType.COLOR
     rgb.resolution = [480, 640]
-    rgb.position = [0.0, 1.5, 0.0]
+    rgb.position = [0.0, 0.1, 0.0]
 
     depth = habitat_sim.CameraSensorSpec()
     depth.uuid = "depth"
     depth.sensor_type = habitat_sim.SensorType.DEPTH
     depth.resolution = [480, 640]
-    depth.position = [0.0, 1.5, 0.0]
+    depth.position = [0.0, 0.1, 0.0]
 
     birdseye = habitat_sim.CameraSensorSpec()
     birdseye.uuid = "birdseye"

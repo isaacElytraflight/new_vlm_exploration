@@ -23,6 +23,7 @@ setup(
             "explorer_bridge_node = explorer_bridge.explorer_bridge_node:main",
             "habitat_map_node = explorer_bridge.habitat_map_node:main",
             "depth_camera_info_node = explorer_bridge.depth_camera_info_node:main",
+            "depth_to_laserscan_node = explorer_bridge.depth_to_laserscan_node:main",
             "cmd_vel_to_discrete_node = explorer_bridge.cmd_vel_to_discrete_node:main",
         ],
     },

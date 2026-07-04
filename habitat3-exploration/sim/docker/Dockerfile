@@ -59,7 +59,7 @@ RUN /opt/conda/envs/habitat/bin/pip install --no-cache-dir \
         imageio opencv-python "numpy<2"
 
 # Python deps for ROS bridge + mission nodes (system Python 3.12 used by rclpy)
-RUN pip3 install --no-cache-dir --break-system-packages numpy pillow imageio requests opencv-python
+RUN pip3 install --no-cache-dir --break-system-packages numpy pillow imageio requests opencv-python pyyaml
 
 # --- EGL plumbing for headless NVIDIA rendering (incl. WSL2) -----------------
 RUN mkdir -p /usr/share/glvnd/egl_vendor.d \

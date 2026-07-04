@@ -5,11 +5,15 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
+from launch.actions import DeclareLaunchArgument, EmitEvent, IncludeLaunchDescription, LogInfo, RegisterEventHandler, TimerAction
+from launch.events import matches_action
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import Node
+from launch_ros.actions import LifecycleNode, Node
+from launch_ros.event_handlers import OnStateTransition
+from launch_ros.events.lifecycle import ChangeState
 from launch_ros.substitutions import FindPackageShare
+from lifecycle_msgs.msg import Transition
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -52,6 +56,46 @@ def generate_launch_description() -> LaunchDescription:
         }.items(),
     )
 
+    slam_toolbox_node = LifecycleNode(
+        package="slam_toolbox",
+        executable="async_slam_toolbox_node",
+        name="slam_toolbox",
+        namespace="",
+        output="screen",
+        parameters=[
+            slam_params,
+            {"use_sim_time": False, "use_lifecycle_manager": False},
+        ],
+        remappings=[
+            ("/map", "/grid_map"),
+            ("/map_metadata", "/grid_map_metadata"),
+        ],
+    )
+
+    slam_configure = EmitEvent(
+        event=ChangeState(
+            lifecycle_node_matcher=matches_action(slam_toolbox_node),
+            transition_id=Transition.TRANSITION_CONFIGURE,
+        )
+    )
+
+    slam_activate = RegisterEventHandler(
+        OnStateTransition(
+            target_lifecycle_node=slam_toolbox_node,
+            start_state="configuring",
+            goal_state="inactive",
+            entities=[
+                LogInfo(msg="[exploration] Activating slam_toolbox lifecycle node"),
+                EmitEvent(
+                    event=ChangeState(
+                        lifecycle_node_matcher=matches_action(slam_toolbox_node),
+                        transition_id=Transition.TRANSITION_ACTIVATE,
+                    )
+                ),
+            ],
+        )
+    )
+
     return LaunchDescription([
         DeclareLaunchArgument("use_privileged_map", default_value="false"),
         DeclareLaunchArgument("realtime_mode", default_value="false"),
@@ -67,7 +111,8 @@ def generate_launch_description() -> LaunchDescription:
             package="tf2_ros",
             executable="static_transform_publisher",
             name="base_to_depth",
-            arguments=["0", "0", "1.5", "0", "0", "0", "base_link", "depth_frame"],
+            # Low forward depth camera (~10 cm above ground), level with base_link.
+            arguments=["0", "0", "0.1", "0", "0", "0", "base_link", "depth_frame"],
         ),
 
         Node(
@@ -78,42 +123,29 @@ def generate_launch_description() -> LaunchDescription:
         ),
 
         Node(
-            package="depthimage_to_laserscan",
-            executable="depthimage_to_laserscan_node",
-            name="depthimage_to_laserscan",
-            remappings=[
-                ("depth", "/depth_data"),
-                ("depth_camera_info", "/depth/camera_info"),
-                ("scan", "/scan"),
-            ],
+            package="explorer_bridge",
+            executable="depth_to_laserscan_node",
+            name="depth_to_laserscan",
             parameters=[{
-                "output_frame": "depth_frame",
+                "output_frame": "base_link",
                 "range_min": 0.1,
-                "range_max": 3.5,
-                "scan_height": 50,
+                "range_max": 5.0,
+                "scan_height": 24,
+                "full_360": True,
+                "band_anchor": "bottom",
             }],
             output="screen",
         ),
 
         TimerAction(
             period=3.0,
-            actions=[
-                Node(
-                    package="slam_toolbox",
-                    executable="async_slam_toolbox_node",
-                    name="slam_toolbox",
-                    output="screen",
-                    parameters=[slam_params],
-                    remappings=[
-                        ("/map", "/grid_map"),
-                        ("/map_metadata", "/grid_map_metadata"),
-                    ],
-                ),
-            ],
+            actions=[slam_toolbox_node, slam_configure],
         ),
 
+        slam_activate,
+
         TimerAction(
-            period=5.0,
+            period=20.0,
             actions=[nav2_navigation],
         ),
 

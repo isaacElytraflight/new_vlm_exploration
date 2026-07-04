@@ -36,15 +36,35 @@ public:
       std::bind(&FrontierVlmClientNode::checkTimeout, this));
 
     RCLCPP_INFO(get_logger(), "Waiting for VLM rate_frontiers action server...");
-    if (!vlm_client_->wait_for_action_server(std::chrono::seconds(15))) {
-      throw std::runtime_error("VLM rate_frontiers action server unavailable");
+    if (!waitForVlmServer()) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "VLM rate_frontiers action server unavailable — "
+        "ensure vlm_node is running and Ollama is reachable.");
+    } else {
+      RCLCPP_INFO(get_logger(), "Connected to VLM rate_frontiers action server.");
     }
-    RCLCPP_INFO(get_logger(), "Connected to VLM rate_frontiers action server.");
   }
 
-private:
+  bool waitForVlmServer()
+  {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
+    while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
+      if (vlm_client_->wait_for_action_server(std::chrono::seconds(0))) {
+        vlm_ready_ = true;
+        return true;
+      }
+      rclcpp::sleep_for(std::chrono::seconds(1));
+    }
+    return false;
+  }
+
   void viewsCb(const explorer_msgs::msg::FrontierViews::SharedPtr fv)
   {
+    if (!vlm_ready_ && !waitForVlmServer()) {
+      RCLCPP_WARN(get_logger(), "Dropping FrontierViews batch; VLM server not ready.");
+      return;
+    }
     if (fv->frontier_ids.empty()) {
       RCLCPP_DEBUG(get_logger(), "Empty FrontierViews batch; skipping.");
       return;
@@ -120,6 +140,7 @@ private:
   rclcpp_action::Client<RateFrontierOpenness>::SharedPtr vlm_client_;
   rclcpp::Subscription<explorer_msgs::msg::FrontierViews>::SharedPtr views_sub_;
   rclcpp::TimerBase::SharedPtr timeout_timer_;
+  bool vlm_ready_{false};
 };
 
 int main(int argc, char ** argv)
