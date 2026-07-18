@@ -6,6 +6,9 @@ set -eo pipefail
 export DISPLAY="${DISPLAY:-:1}"
 bash /workspace/scripts/ensure_display.sh
 
+# Always clear prior episode processes (tmux children + orphaned ros2 run nodes).
+bash /workspace/scripts/cleanup_episode.sh
+
 LIVE_DIR=/tmp/habitat_live
 FRAME="$LIVE_DIR/frame.jpg"
 mkdir -p "$LIVE_DIR"
@@ -24,8 +27,7 @@ EOF
 fi
 
 pkill -f "feh.*habitat_live" 2>/dev/null || true
-pkill -f "live_viewer.py" 2>/dev/null || true
-pkill -f "habitat_engine.py" 2>/dev/null || true
+# engine/viewer already cleared by cleanup_episode.sh
 rm -f /tmp/habitat_engine.sock 2>/dev/null || true
 sleep 0.2
 

@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import math
 import os
+import socket
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
-import math
-
+import numpy as np
 import rclpy
 from explorer_msgs.action import DiscreteMove
 from geometry_msgs.msg import Quaternion, TransformStamped, Twist
@@ -21,7 +24,7 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import Header
 from tf2_ros import TransformBroadcaster
 
-from explorer_bridge.driver_protocol import ExplorerDriver
+from explorer_bridge.driver_protocol import ExplorerDriver, PoseData
 from explorer_bridge.habitat_driver import HabitatDriver
 from explorer_bridge.hardware_driver import HardwareDriver
 from explorer_bridge.image_utils import depth_array_to_image, rgb_array_to_image, write_jpeg_frame
@@ -34,9 +37,19 @@ DIRECTION_TO_ACTION = {
     DiscreteMove.Goal.TURN_RIGHT: "turn_right",
 }
 
+TELEOP_NAME_TO_ACTION = {
+    "forward": "move_forward",
+    "backward": "move_backward",
+    "turn_left": "turn_left",
+    "left": "turn_left",
+    "turn_right": "turn_right",
+    "right": "turn_right",
+}
+
 VALID_DIRECTIONS = set(DIRECTION_TO_ACTION.keys())
 DEFAULT_LIVE_FRAME = "/tmp/habitat_live/frame.jpg"
 DEFAULT_BIRDSEYE_FRAME = "/tmp/habitat_live/birdseye.jpg"
+DEFAULT_TELEOP_SOCKET = "/tmp/elytra_teleop.sock"
 
 
 def create_driver(backend: str, socket_path: str) -> ExplorerDriver:
@@ -68,6 +81,7 @@ class ExplorerBridgeNode(Node):
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("odom_topic", "/odom")
         self.declare_parameter("depth_frame", "depth_frame")
+        self.declare_parameter("teleop_socket_path", DEFAULT_TELEOP_SOCKET)
 
         backend = self.get_parameter("driver_backend").get_parameter_value().string_value
         socket_path = self.get_parameter("habitat_socket_path").get_parameter_value().string_value
@@ -87,6 +101,14 @@ class ExplorerBridgeNode(Node):
         self._birdseye_pub = self.create_publisher(Image, birdseye_topic, qos_profile_sensor_data)
 
         self._cb_group = ReentrantCallbackGroup()
+        self._io_lock = threading.Lock()
+        self._motion_active = 0
+        # JPEG bind-mount writes must not block odom/TF/depth publish.
+        self._jpeg_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bridge-jpeg")
+        self._teleop_socket_path = self.get_parameter("teleop_socket_path").get_parameter_value().string_value
+        self._teleop_stop = threading.Event()
+        self._teleop_thread = threading.Thread(target=self._teleop_loop, daemon=True, name="elytra-teleop")
+        self._teleop_thread.start()
         self._action_server = ActionServer(
             self,
             DiscreteMove,
@@ -132,18 +154,35 @@ class ExplorerBridgeNode(Node):
         return CancelResponse.ACCEPT
 
     def _publish_sensor_data(self) -> None:
+        # During DiscreteMove, only the post-step publish should emit sensors.
+        # Timer duplicates with a new stamp would flood /scan and amplify smear.
+        if self._motion_active > 0:
+            return
+        with self._io_lock:
+            self._publish_sensor_data_locked()
+
+    def _publish_sensor_data_locked(self) -> None:
         if not self._driver_ready:
             return
         try:
-            obs = self._driver.get_observations()
+            if hasattr(self._driver, "get_observations_with_pose") and hasattr(self, "_odom_pub"):
+                obs, pose = self._driver.get_observations_with_pose()
+            else:
+                obs = self._driver.get_observations()
+                pose = self._driver.get_pose() if hasattr(self, "_odom_pub") else None
         except Exception as exc:
             self.get_logger().warn(f"get_observations failed: {exc}")
             self._driver_ready = False
             return
 
         stamp = self.get_clock().now().to_msg()
-        header = Header(stamp=stamp, frame_id="camera")
 
+        # Publish privileged pose/TF BEFORE depth/RGB so stamp-matched consumers
+        # see odom before the depth→scan pipeline runs.
+        if pose is not None:
+            self._publish_odom_tf_from_pose(pose, stamp)
+
+        header = Header(stamp=stamp, frame_id="camera")
         self._rgb_pub.publish(rgb_array_to_image(obs.rgb, header=header, frame_id="camera"))
         depth_header = Header(stamp=stamp, frame_id=self._depth_frame)
         self._depth_pub.publish(
@@ -155,20 +194,25 @@ class ExplorerBridgeNode(Node):
             self._birdseye_pub.publish(
                 rgb_array_to_image(obs.birdseye, header=birdseye_header, frame_id="birdseye")
             )
-            try:
-                os.makedirs(os.path.dirname(self._birdseye_frame), exist_ok=True)
-                write_jpeg_frame(self._birdseye_frame, obs.birdseye)
-            except Exception as exc:
-                self.get_logger().debug(f"birdseye frame write skipped: {exc}")
 
+        # Async JPEG so bind-mount latency cannot stall the next odom/depth cycle.
+        if obs.birdseye is not None:
+            self._enqueue_jpeg(self._birdseye_frame, obs.birdseye)
+        self._enqueue_jpeg(self._live_frame, obs.rgb)
+
+    def _enqueue_jpeg(self, path: str, rgb) -> None:
         try:
-            os.makedirs(os.path.dirname(self._live_frame), exist_ok=True)
-            write_jpeg_frame(self._live_frame, obs.rgb)
+            frame = np.ascontiguousarray(rgb[..., :3] if getattr(rgb, "ndim", 0) == 3 else rgb).copy()
+            self._jpeg_pool.submit(self._write_jpeg_safe, path, frame)
         except Exception as exc:
-            self.get_logger().debug(f"live frame write skipped: {exc}")
+            self.get_logger().debug(f"jpeg enqueue skipped: {exc}")
 
-        if hasattr(self, "_odom_pub"):
-            self._publish_odom_tf(stamp)
+    def _write_jpeg_safe(self, path: str, rgb) -> None:
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            write_jpeg_frame(path, rgb)
+        except Exception as exc:
+            self.get_logger().debug(f"jpeg write skipped: {exc}")
 
     @staticmethod
     def _yaw_to_quaternion(yaw_rad: float) -> Quaternion:
@@ -177,8 +221,8 @@ class ExplorerBridgeNode(Node):
         q.w = math.cos(yaw_rad / 2.0)
         return q
 
-    def _habitat_pose_to_odom(self, pose) -> tuple[float, float, float]:
-        """Express Habitat ground-truth pose relative to episode start (odom frame)."""
+    def _habitat_pose_to_odom(self, pose: PoseData) -> tuple[float, float, float]:
+        """Express privileged pose relative to episode start (odom frame)."""
         if self._odom_origin is None:
             self._odom_origin = (pose.x, pose.y, pose.yaw_rad)
         ox, oy, oyaw = self._odom_origin
@@ -195,18 +239,8 @@ class ExplorerBridgeNode(Node):
             odom_yaw += 2.0 * math.pi
         return odom_x, odom_y, odom_yaw
 
-    def _publish_odom_tf(self, stamp=None) -> None:
-        if not self._driver_ready:
-            return
-        try:
-            pose = self._driver.get_pose()
-        except Exception as exc:
-            self.get_logger().debug(f"get_pose failed: {exc}")
-            return
-
+    def _publish_odom_tf_from_pose(self, pose: PoseData, stamp) -> None:
         odom_x, odom_y, odom_yaw = self._habitat_pose_to_odom(pose)
-        if stamp is None:
-            stamp = self.get_clock().now().to_msg()
         odom = Odometry()
         odom.header.stamp = stamp
         odom.header.frame_id = self._odom_frame
@@ -225,36 +259,112 @@ class ExplorerBridgeNode(Node):
         tf_msg.transform.rotation = odom.pose.pose.orientation
         self._tf_broadcaster.sendTransform(tf_msg)
 
+    def _teleop_step_name(self, name: str) -> tuple[bool, str]:
+        action = TELEOP_NAME_TO_ACTION.get(str(name).strip().lower())
+        if not action:
+            return False, "bad_direction"
+        self._motion_active += 1
+        try:
+            with self._io_lock:
+                step_result = self._driver.step(action, 1)
+                if not step_result.success:
+                    return False, step_result.message or "step_failed"
+                self._publish_sensor_data_locked()
+            return True, "ok"
+        except Exception as exc:
+            return False, str(exc)
+        finally:
+            self._motion_active = max(0, self._motion_active - 1)
+
+    def _teleop_loop(self) -> None:
+        path = self._teleop_socket_path
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            server.bind(path)
+            server.listen(8)
+            server.settimeout(0.5)
+            self.get_logger().info(f"Teleop socket listening on {path}")
+            while not self._teleop_stop.is_set() and rclpy.ok():
+                try:
+                    conn, _ = server.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                with conn:
+                    try:
+                        raw = conn.recv(64).decode("utf-8", errors="replace").strip()
+                        ok, msg = self._teleop_step_name(raw.split()[0] if raw else "")
+                        conn.sendall(f"{'ok' if ok else 'err'}:{msg}\n".encode("utf-8"))
+                    except Exception as exc:
+                        try:
+                            conn.sendall(f"err:{exc}\n".encode("utf-8"))
+                        except OSError:
+                            pass
+        finally:
+            try:
+                server.close()
+            except OSError:
+                pass
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
     async def _execute_move(self, goal_handle):
         goal = goal_handle.request
         action = DIRECTION_TO_ACTION[goal.direction]
         feedback = DiscreteMove.Feedback()
         result = DiscreteMove.Result()
 
+        self._motion_active += 1
         completed = 0
         collided = False
-        for _ in range(goal.steps):
-            step_result = self._driver.step(action, 1)
-            if not step_result.success:
-                result.success = False
-                result.collided = step_result.collided
-                result.message = step_result.message
-                goal_handle.abort()
-                return result
-            completed += step_result.steps_completed
-            collided = collided or step_result.collided
-            feedback.steps_completed = completed
-            goal_handle.publish_feedback(feedback)
-            # Keep depth/odom stamps aligned after each discrete step (critical during 360° turns).
-            self._publish_sensor_data()
+        try:
+            for _ in range(goal.steps):
+                with self._io_lock:
+                    step_result = self._driver.step(action, 1)
+                    if not step_result.success:
+                        result.success = False
+                        result.collided = step_result.collided
+                        result.message = step_result.message
+                        goal_handle.abort()
+                        return result
+                    completed += step_result.steps_completed
+                    collided = collided or step_result.collided
+                    # Same lock: depth + odom share one pose (prevents spiral maps).
+                    self._publish_sensor_data_locked()
+                feedback.steps_completed = completed
+                goal_handle.publish_feedback(feedback)
 
-        result.success = True
-        result.collided = collided
-        result.message = "OK"
-        goal_handle.succeed()
-        return result
+            result.success = True
+            result.collided = collided
+            result.message = "OK"
+            goal_handle.succeed()
+            return result
+        finally:
+            self._motion_active = max(0, self._motion_active - 1)
 
     def destroy_node(self) -> bool:
+        self._teleop_stop.set()
+        try:
+            # Unblock accept() by connecting once.
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(0.2)
+            s.connect(self._teleop_socket_path)
+            s.close()
+        except OSError:
+            pass
+        try:
+            self._jpeg_pool.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
         try:
             self._driver.shutdown()
         except Exception:

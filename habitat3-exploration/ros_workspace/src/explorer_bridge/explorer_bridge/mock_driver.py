@@ -41,6 +41,9 @@ class MockHabitatDriver:
         depth[1, 1] = MARKER_DEPTH + 0.5
         return ObservationData(rgb=rgb, depth=depth, collided=self._collided, birdseye=birdseye)
 
+    def get_observations_with_pose(self):
+        return self.get_observations(), self.get_pose()
+
     def step(self, action: str, count: int = 1) -> StepResult:
         if not self._alive:
             return StepResult(

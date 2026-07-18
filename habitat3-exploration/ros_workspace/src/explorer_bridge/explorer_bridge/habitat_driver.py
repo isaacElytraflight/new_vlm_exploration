@@ -13,6 +13,9 @@ class HabitatDriver:
     def get_observations(self) -> ObservationData:
         return self._client.get_observations()
 
+    def get_observations_with_pose(self):
+        return self._client.get_observations_with_pose()
+
     def step(self, action: str, count: int = 1) -> StepResult:
         return self._client.step(action, count)
 

@@ -24,6 +24,7 @@ sim:
   missionDir: /workspace/missions
   rosInstallSetupPath: /opt/explorer_workspace/ros_workspace/install/setup.bash
   startScriptPath: /workspace/scripts/start_sim.sh
+  stopScriptPath: /workspace/scripts/stop_sim.sh
   recordingScriptPath: /workspace/scripts/start_sim.sh
   tmuxSession: habitat
   tmuxCaptureLines: 200
@@ -51,6 +52,26 @@ buttons:
     description: Stop the running Habitat episode
     kind: script
     stopAction: true
+  - id: step-forward
+    label: Step Forward
+    description: Move forward one discrete step (0.25 m). Requires a running episode.
+    kind: teleop
+    teleopDirection: forward
+  - id: turn-left
+    label: Rotate Left
+    description: Turn left one discrete step (10°). Requires a running episode.
+    kind: teleop
+    teleopDirection: turn_left
+  - id: turn-right
+    label: Rotate Right
+    description: Turn right one discrete step (10°). Requires a running episode.
+    kind: teleop
+    teleopDirection: turn_right
+  - id: step-backward
+    label: Step Backward
+    description: Move backward one discrete step (0.25 m). Requires a running episode.
+    kind: teleop
+    teleopDirection: backward
   - id: smoke-test
     label: GPU Smoke Test
     description: Load a test scene, step a random agent, report renderer + FPS

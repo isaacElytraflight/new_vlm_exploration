@@ -73,6 +73,26 @@ class HabitatIpcClient:
             birdseye=birdseye,
         )
 
+    def get_observations_with_pose(self) -> tuple[ObservationData, PoseData]:
+        data = self._request({"cmd": "get_obs_and_pose"})
+        rgb = self._decode_array(data["rgb_b64"], data["rgb_shape"], "uint8")
+        depth = self._decode_array(data["depth_b64"], data["depth_shape"], "float32")
+        birdseye = None
+        if "birdseye_b64" in data and "birdseye_shape" in data:
+            birdseye = self._decode_array(data["birdseye_b64"], data["birdseye_shape"], "uint8")
+        obs = ObservationData(
+            rgb=rgb,
+            depth=depth,
+            collided=bool(data.get("collided", False)),
+            birdseye=birdseye,
+        )
+        pose = PoseData(
+            x=float(data["x"]),
+            y=float(data["y"]),
+            yaw_rad=float(data["yaw_rad"]),
+        )
+        return obs, pose
+
     def step(self, action: str, count: int = 1) -> StepResult:
         data = self._request({"cmd": "step", "action": action, "count": int(count)})
         return StepResult(

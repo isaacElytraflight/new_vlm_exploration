@@ -54,11 +54,17 @@ def normalize_range(
     *,
     range_min: float,
     clear_range: float,
+    free_near_eps: float = 2.5,
 ) -> float:
-    """Clamp invalid / long hits to clear_range so SLAM marks free space, not unknown."""
+    """Clamp invalid / near-clip / long hits to clear_range (free, not a wall).
+
+    Habitat depth often saturates several meters below ``far`` (seen ~8–9.9 m
+    with far=10). Values within free_near_eps of clear_range become clear_range.
+    """
     if not math.isfinite(raw) or raw < range_min:
         return clear_range
-    if raw > clear_range:
+    eps = max(0.0, float(free_near_eps))
+    if raw >= clear_range - eps:
         return clear_range
     return raw
 
@@ -76,6 +82,7 @@ def depth_to_laserscan_bins(
     band_anchor: BandAnchor = "bottom",
     full_360: bool = True,
     num_bins: int = 360,
+    free_near_eps: float = 2.5,
 ) -> tuple[list[float], float, float, float]:
     """Build a LaserScan range array in base_link (0 rad = forward, + = left)."""
     if depth.ndim != 2:
@@ -114,7 +121,10 @@ def depth_to_laserscan_bins(
         bearing = math.atan2(y_bl, x_bl)
         horiz_range = math.hypot(x_bl, y_bl)
         normalized = normalize_range(
-            horiz_range, range_min=range_min, clear_range=clear_range
+            horiz_range,
+            range_min=range_min,
+            clear_range=clear_range,
+            free_near_eps=free_near_eps,
         )
         if full_360:
             idx = int(round((bearing - angle_min) / angle_increment)) % num_bins
@@ -128,8 +138,10 @@ def depth_to_laserscan_bins(
         if cell:
             ranges.append(min(cell))
         else:
-            # No sensor coverage for this bearing — assume open floor to clear_range.
-            ranges.append(clear_range)
+            # No camera coverage for this bearing — leave unknown for SLAM.
+            # Filling clear_range here makes every scan look like a 5–10 m circle
+            # and prevents the map from growing during pure rotation.
+            ranges.append(float("nan"))
 
     return ranges, angle_min, angle_max, angle_increment
 
@@ -156,6 +168,7 @@ def column_ranges_from_depth(
         scan_height=scan_height,
         full_360=kwargs.get("full_360", False),
         band_anchor=kwargs.get("band_anchor", "center"),
+        free_near_eps=float(kwargs.get("free_near_eps", 2.5)),
     )
 
 

@@ -65,6 +65,10 @@ def make_sim() -> habitat_sim.Simulator:
     depth.sensor_type = habitat_sim.SensorType.DEPTH
     depth.resolution = [480, 640]
     depth.position = [0.0, 0.1, 0.0]
+    # Explicit far clip so saturated far depths land at `far` and can be treated
+    # as free (not a fake wall ring) by the laserscan → occupancy path.
+    depth.near = 0.1
+    depth.far = 10.0
 
     birdseye = habitat_sim.CameraSensorSpec()
     birdseye.uuid = "birdseye"
@@ -151,7 +155,7 @@ class HabitatEngine:
         return collided, completed
 
     def get_pose(self) -> Tuple[float, float, float]:
-        """Return (x, y, yaw_rad) in a 2D map frame (habitat X-Z plane)."""
+        """Return (x, y, yaw_rad) in ROS plan frame (X forward at spawn, Y left)."""
         state = self._sim.get_agent(0).get_state()
         pos = state.position
         rot = state.rotation
@@ -162,8 +166,11 @@ class HabitatEngine:
                 mn.Vector3(float(rot.x), float(rot.y), float(rot.z)), float(rot.w)
             )
         forward = rot.transform_vector_normalized(mn.Vector3(0.0, 0.0, -1.0))
-        yaw = float(np.arctan2(forward.x, -forward.z))
-        return float(pos[0]), float(pos[2]), yaw
+        # Keep conversion import-light inside the engine process (conda env).
+        ros_x = -float(pos[2])
+        ros_y = -float(pos[0])
+        yaw = float(np.arctan2(-float(forward.x), -float(forward.z)))
+        return ros_x, ros_y, yaw
 
     def get_map(self) -> Tuple[np.ndarray, float, float, float]:
         """Return (grid int8 HxW, resolution, origin_x, origin_y).
@@ -215,6 +222,17 @@ def _handle_request(engine: HabitatEngine, payload: Dict[str, Any]) -> Dict[str,
     cmd = payload.get("cmd")
     if cmd == "get_obs":
         return _encode_obs_response(engine)
+    if cmd == "get_obs_and_pose":
+        # Single request so depth and privileged pose cannot diverge across IPC calls.
+        try:
+            payload = _encode_obs_response(engine)
+            x, y, yaw = engine.get_pose()
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        payload["x"] = x
+        payload["y"] = y
+        payload["yaw_rad"] = yaw
+        return payload
     if cmd == "get_pose":
         try:
             x, y, yaw = engine.get_pose()

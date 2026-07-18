@@ -1,25 +1,20 @@
 #!/usr/bin/env python3
-"""Full exploration stack: SLAM + Nav2 + mission nodes (sensor-driven mapping)."""
+"""Exploration stack: privileged pose + sensor occupancy + Nav2 (no slam_toolbox)."""
 
 import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, EmitEvent, IncludeLaunchDescription, LogInfo, RegisterEventHandler, TimerAction
-from launch.events import matches_action
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import LifecycleNode, Node
-from launch_ros.event_handlers import OnStateTransition
-from launch_ros.events.lifecycle import ChangeState
+from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
-from lifecycle_msgs.msg import Transition
 
 
 def generate_launch_description() -> LaunchDescription:
     explorer_share = get_package_share_directory("explorer_mission")
     nav2_params = os.path.join(explorer_share, "config", "nav2_params.yaml")
-    slam_params = os.path.join(explorer_share, "config", "slam_toolbox.yaml")
 
     use_privileged_map = LaunchConfiguration("use_privileged_map")
     realtime_mode = LaunchConfiguration("realtime_mode")
@@ -56,46 +51,6 @@ def generate_launch_description() -> LaunchDescription:
         }.items(),
     )
 
-    slam_toolbox_node = LifecycleNode(
-        package="slam_toolbox",
-        executable="async_slam_toolbox_node",
-        name="slam_toolbox",
-        namespace="",
-        output="screen",
-        parameters=[
-            slam_params,
-            {"use_sim_time": False, "use_lifecycle_manager": False},
-        ],
-        remappings=[
-            ("/map", "/grid_map"),
-            ("/map_metadata", "/grid_map_metadata"),
-        ],
-    )
-
-    slam_configure = EmitEvent(
-        event=ChangeState(
-            lifecycle_node_matcher=matches_action(slam_toolbox_node),
-            transition_id=Transition.TRANSITION_CONFIGURE,
-        )
-    )
-
-    slam_activate = RegisterEventHandler(
-        OnStateTransition(
-            target_lifecycle_node=slam_toolbox_node,
-            start_state="configuring",
-            goal_state="inactive",
-            entities=[
-                LogInfo(msg="[exploration] Activating slam_toolbox lifecycle node"),
-                EmitEvent(
-                    event=ChangeState(
-                        lifecycle_node_matcher=matches_action(slam_toolbox_node),
-                        transition_id=Transition.TRANSITION_ACTIVATE,
-                    )
-                ),
-            ],
-        )
-    )
-
     return LaunchDescription([
         DeclareLaunchArgument("use_privileged_map", default_value="false"),
         DeclareLaunchArgument("realtime_mode", default_value="false"),
@@ -107,11 +62,19 @@ def generate_launch_description() -> LaunchDescription:
 
         exploration_launch,
 
+        # map ≡ odom origin (episode start). Real robot: T265 provides odom→base;
+        # map→odom stays identity (or from T265 world frame).
+        Node(
+            package="tf2_ros",
+            executable="static_transform_publisher",
+            name="map_to_odom",
+            arguments=["0", "0", "0", "0", "0", "0", "map", "odom"],
+        ),
+
         Node(
             package="tf2_ros",
             executable="static_transform_publisher",
             name="base_to_depth",
-            # Low forward depth camera (~10 cm above ground), level with base_link.
             arguments=["0", "0", "0.1", "0", "0", "0", "base_link", "depth_frame"],
         ),
 
@@ -129,23 +92,38 @@ def generate_launch_description() -> LaunchDescription:
             parameters=[{
                 "output_frame": "base_link",
                 "range_min": 0.1,
-                "range_max": 5.0,
+                "range_max": 10.0,
                 "scan_height": 24,
-                "full_360": True,
-                "band_anchor": "bottom",
+                "full_360": False,
+                "band_anchor": "center",
+                "free_near_eps": 2.5,
+            }],
+            output="screen",
+        ),
+
+        Node(
+            package="explorer_bridge",
+            executable="known_pose_mapper_node",
+            name="known_pose_mapper",
+            parameters=[{
+                "scan_topic": "/scan",
+                "grid_topic": "/grid_map",
+                "map_frame": "map",
+                "base_frame": "base_link",
+                "resolution": 0.05,
+                "initial_size_m": 20.0,
+                "publish_hz": 5.0,
+                "odom_topic": "/odom",
+                "max_stamp_skew_sec": 0.0,
+                "odom_cache_size": 2048,
+                "pending_scan_limit": 128,
+                "free_near_max_eps": 2.5,
             }],
             output="screen",
         ),
 
         TimerAction(
-            period=3.0,
-            actions=[slam_toolbox_node, slam_configure],
-        ),
-
-        slam_activate,
-
-        TimerAction(
-            period=20.0,
+            period=5.0,
             actions=[nav2_navigation],
         ),
 

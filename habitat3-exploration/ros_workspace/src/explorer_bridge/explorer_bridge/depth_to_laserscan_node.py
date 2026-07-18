@@ -16,15 +16,16 @@ class DepthToLaserScanNode(Node):
     def __init__(self) -> None:
         super().__init__("depth_to_laserscan")
         self.declare_parameter("range_min", 0.1)
-        self.declare_parameter("range_max", 5.0)
+        self.declare_parameter("range_max", 10.0)
         self.declare_parameter("scan_height", 24)
         self.declare_parameter("output_frame", "base_link")
         self.declare_parameter("depth_topic", "/depth_data")
         self.declare_parameter("camera_info_topic", "/depth/camera_info")
         self.declare_parameter("scan_topic", "/scan")
-        self.declare_parameter("full_360", True)
-        self.declare_parameter("band_anchor", "bottom")
+        self.declare_parameter("full_360", False)
+        self.declare_parameter("band_anchor", "center")
         self.declare_parameter("num_bins", 360)
+        self.declare_parameter("free_near_eps", 2.5)
 
         self._range_min = float(self.get_parameter("range_min").value)
         self._range_max = float(self.get_parameter("range_max").value)
@@ -33,6 +34,7 @@ class DepthToLaserScanNode(Node):
         self._full_360 = bool(self.get_parameter("full_360").value)
         self._band_anchor = str(self.get_parameter("band_anchor").value)
         self._num_bins = int(self.get_parameter("num_bins").value)
+        self._free_near_eps = float(self.get_parameter("free_near_eps").value)
         scan_topic = str(self.get_parameter("scan_topic").value)
         depth_topic = str(self.get_parameter("depth_topic").value)
         info_topic = str(self.get_parameter("camera_info_topic").value)
@@ -75,6 +77,7 @@ class DepthToLaserScanNode(Node):
             band_anchor=self._band_anchor,  # type: ignore[arg-type]
             full_360=self._full_360,
             num_bins=self._num_bins,
+            free_near_eps=self._free_near_eps,
         )
 
         scan = LaserScan()

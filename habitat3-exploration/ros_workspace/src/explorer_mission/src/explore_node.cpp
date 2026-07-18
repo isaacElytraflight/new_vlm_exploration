@@ -110,7 +110,7 @@ public:
       return false;
     }
 
-    RCLCPP_INFO(get_logger(), "Waiting for SLAM (/grid_map + map TF)...");
+    RCLCPP_INFO(get_logger(), "Waiting for map (/grid_map + map TF)...");
     const auto start_wait = now();
     bool bootstrap_sent = false;
     while (rclcpp::ok() &&
@@ -146,7 +146,7 @@ public:
       if (!have_grid_ || !tf_received_) {
         RCLCPP_ERROR(
           get_logger(),
-          "Timed out waiting for SLAM map (/grid_map=%s, map TF=%s)",
+          "Timed out waiting for map (/grid_map=%s, map TF=%s)",
           have_grid_ ? "ok" : "missing",
           tf_received_ ? "ok" : "missing");
         return false;

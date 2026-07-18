@@ -90,6 +90,57 @@ def test_odom_stamp_matches_depth_stamp_positive(ros_context):
     bridge.destroy_node()
 
 
+def test_tf_lookup_at_depth_stamp_without_fallback_positive(ros_context):
+    """On depth arrival, odom→base_link at that stamp must already be in the TF buffer."""
+    from rclpy.duration import Duration
+    from tf2_ros import Buffer, TransformListener
+
+    driver = MockHabitatDriver()
+    bridge = ExplorerBridgeNode(driver=driver)
+    stop = threading.Event()
+    spin_node_background(bridge, stop)
+
+    listener = Node("tf_depth_order_listener")
+    tf_buffer = Buffer()
+    TransformListener(tf_buffer, listener)
+    spin_node_background(listener, stop)
+
+    results: list[bool] = []
+
+    def on_depth(msg: Image) -> None:
+        try:
+            tf_buffer.lookup_transform(
+                "odom",
+                "base_link",
+                msg.header.stamp,
+                timeout=Duration(seconds=0.0),
+            )
+            results.append(True)
+        except Exception:
+            results.append(False)
+
+    sub = Node("depth_order_sub")
+    sub.create_subscription(Image, "/depth_data", on_depth, qos_profile_sensor_data)
+    spin_node_background(sub, stop)
+
+    assert wait_until(lambda: len(results) >= 3, timeout_sec=5.0)
+    # Allow a brief warm-up miss on the first frame; after that stamp lookups must work.
+    assert results.count(True) >= 2, f"stamp TF lookups failed: {results}"
+
+    stop.set()
+    sub.destroy_node()
+    listener.destroy_node()
+    bridge.destroy_node()
+
+
+def test_stamp_tf_miss_must_not_use_latest_policy_negative():
+    """Negative control: mapper policy rejects stamp misses (no silent latest TF)."""
+    from explorer_bridge.scan_to_occupancy import should_integrate_with_tf
+
+    assert should_integrate_with_tf(stamp_lookup_ok=False) is False
+    assert should_integrate_with_tf(stamp_lookup_ok=True) is True
+
+
 def test_depth_camera_info_without_depth_negative(ros_context):
     info_node = DepthCameraInfoNode(
         parameter_overrides=_TEST_NODE_PARAMS,

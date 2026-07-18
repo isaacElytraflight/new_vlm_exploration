@@ -31,9 +31,9 @@ QoS: `sensor_data` profile (best effort, keep last).
 
 | Topic / action | Type | Description |
 |----------------|------|-------------|
-| `/scan` | `sensor_msgs/LaserScan` | Synthetic scan from depth (`depthimage_to_laserscan`) |
-| `/grid_map` | `nav_msgs/OccupancyGrid` | SLAM-built occupancy grid (`slam_toolbox`, remapped from `/map`) |
-| `/odom` | `nav_msgs/Odometry` | Wheel-equivalent odometry (`odom` → `base_link` TF) |
+| `/scan` | `sensor_msgs/LaserScan` | Synthetic scan from depth (`depth_to_laserscan`) |
+| `/grid_map` | `nav_msgs/OccupancyGrid` | Known-pose occupancy from `/scan` + privileged TF |
+| `/odom` | `nav_msgs/Odometry` | Privileged pose (Habitat GT / T265): `odom` → `base_link` TF |
 | `/cmd_vel` | `geometry_msgs/Twist` | Nav2 controller output → discrete bridge |
 | `/plan`, `/local_plan` | `nav_msgs/Path` | Nav2 global/local plans (overlaid in map renderer) |
 | `rotate_360` | `explorer_msgs/Rotate360` | 360° scan with image capture |
@@ -84,11 +84,12 @@ QoS: `sensor_data` profile (best effort, keep last).
 
 ### Mapping pipeline (sim-to-real parity)
 
-Default launch (`nav2_exploration.launch.py`) builds `/grid_map` from sensors only:
+Default launch (`nav2_exploration.launch.py`) mirrors the real robot (T265 pose + depth mapping):
 
-1. `/depth_data` → `depthimage_to_laserscan` → `/scan`
-2. `/scan` + `/odom` → `slam_toolbox` → `/grid_map` + `map` → `odom` TF
-3. `explore_node` reads `/grid_map` on demand at tree leaf nodes
+1. Privileged pose: Habitat GT (sim) or T265 (real) → `/odom` + `odom`→`base_link`; `map`→`odom` identity
+2. `/depth_data` → `depth_to_laserscan` → `/scan`
+3. `/scan` + map→base TF → `known_pose_mapper` → `/grid_map` (no slam_toolbox)
+4. `explore_node` reads `/grid_map` on demand at tree leaf nodes
 
 Debug-only: `use_privileged_map:=true` restores `habitat_map_node` (Habitat pathfinder / `get_map` IPC).
 
@@ -117,7 +118,7 @@ Debug-only: `use_privileged_map:=true` restores `habitat_map_node` (Habitat path
 
 1. `habitat_engine.py` — conda Python, owns `habitat_sim`
 2. `explorer_bridge_node` — sensors, discrete move action, `odom` → `base_link` TF
-3. `depthimage_to_laserscan` + `slam_toolbox` — sensor-driven `/grid_map`
+3. `depth_to_laserscan` + `known_pose_mapper` — sensor `/grid_map` with privileged pose
 4. Nav2 stack — planner, controller, costmaps
 5. `cmd_vel_to_discrete_node` — `/cmd_vel` → `/movement/discrete_move`
 6. `explorer_mission` nodes — actions, explore, VLM client, VLM server, map renderer

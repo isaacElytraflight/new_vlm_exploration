@@ -6,6 +6,314 @@ Add a new dated section at the top when you work on this repo.
 
 ---
 
+## 2026-07-17 — Day summary (mapping + teleop + session hygiene)
+
+Long debugging day on Habitat grid mapping and Elytra control. End state: known-pose occupancy mapper (no slam_toolbox), cleaner scan integration, Stop Episode that actually kills orphans, and fast teleop buttons via unix socket.
+
+### Themes
+1. **Pose / map sync** — Spiral FOV, yaw lag while rotating, then the opposite (no scans during 360°) from TF “future” extrapolation on a blocked executor.
+2. **Scan quality** — Fake max-range walls, stacked arcs on step/rotate, map-wide free triangle on rescale.
+3. **Ops / UX** — Duplicate robot sessions after Stop; slow move buttons (ROS oneshot → socket teleop).
+
+### Architecture decisions that stuck
+- **No slam_toolbox** for sim: Habitat GT pose is privileged; `known_pose_mapper` raycasts `/scan` into `/grid_map` with `map`≡`odom`.
+- Habitat→ROS pose: `x=-hab_z`, `y=-hab_x`, `yaw=atan2(-fwd.x, -fwd.z)` so turn_left → +yaw and forward → +x.
+- Exact `/odom`↔`/scan` stamp match (`max_stamp_skew_sec: 0`); integrate from odom stamp cache, not blocking TF lookup.
+- Saturated depth near `range_max` is free (`free_near_eps` / `free_near_max_eps` = **2.5 m**); free rays overwrite prior occupied.
+- Expand grid for all ray endpoints **before** Bresenham (fixes corner free-triangle on rescale).
+- Episode cleanup: `cleanup_episode.sh` + `stopScriptPath`; teleop: bridge `/tmp/elytra_teleop.sock` + Elytra `kind: teleop`.
+
+### What did *not* work (or only partly)
+- Silent “latest TF” fallback hid stamp skew by painting at wrong yaw.
+- Exact stamp match alone did not stop smear until atomic `get_obs_and_pose` + DiscreteMove timer suppress + stronger signature guard.
+- `free_near_eps=0.5` then `1.5` still left far arcs; **2.5 m** is the current default (far walls inside the clip band can look soft).
+- Teleop still pays one `docker exec` per click on Windows — much faster than ROS CLI, not yet “instant.”
+
+### Repos touched
+- `new_vlm_exploration` (habitat mapper/bridge/scripts + this journal)
+- `elytra-bridge` (stopScriptPath, teleopStep, UI allows teleop while inFlight)
+
+### Ops reminder
+Restart Elytra backend; Stop Episode → Run; reconnect project so `kind: teleop` buttons load.
+
+Detail sections below are chronological notes from the same day.
+
+---
+
+## 2026-07-17 — Map-wide free triangle + faster teleop
+
+### Symptom
+1. Occasional huge white triangle into the map corner after rescale
+2. Remaining far-range occupied arcs on rotate
+3. Move buttons still very slow
+
+### Cause
+1. `integrate_scan` called `ensure_contains` (expand) mid-loop but kept a **stale** robot cell for Bresenham → diagonal free ray across the new grid
+2. Clip band still too tight (8–9.5 m hits); `free_near_eps` → **2.5 m**
+3. Teleop still went through oneshot script + `persistSessionState` + `bash -lc`
+
+### Fix
+- Pre-expand all ray endpoints, then raycast with stable origin
+- Stronger clip margin (2.5 m)
+- `kind: teleop` → `simTarget.teleopStep()` direct `docker exec python` to unix socket (no ROS CLI, no session persist)
+
+### Ops
+Restart Elytra backend + Stop/Run episode; reconnect project for button kinds.
+
+---
+
+## 2026-07-17 — Stacked max-range arcs + slow teleop
+
+### Symptom
+Each Step Forward painted a new occupied arc near sensor range; buttons were slow (full `ros2 action` oneshot).
+
+### Cause
+Live scans had many rays at 9.0–9.5 m while `free_near_eps` was only 0.5 m (freed ≥9.5). Free rays also did not clear prior occupied cells, so fake walls persisted.
+
+### Fix
+- `free_near_eps` / `free_near_max_eps` → **1.5 m**; free rays overwrite occupied
+- Fast teleop: bridge unix socket `/tmp/elytra_teleop.sock` + `teleop_step.sh` (no ROS CLI)
+
+### Ops
+Stop → Run; reconnect project for button script paths.
+
+---
+
+## 2026-07-17 — Manual teleop project actions
+
+### Change
+Added Elytra project buttons: Step Forward / Rotate Left / Rotate Right / Step Backward via oneshot `discrete_move.sh` → `/movement/discrete_move`.
+
+### Ops
+Reload/reconnect the habitat3-exploration project in Elytra so `project.yaml` buttons refresh. Episode must be running.
+
+---
+
+## 2026-07-17 — Fake walls at ~depth clip
+
+### Symptom
+Grid showed obstacle rings ~5 m out where open space / far walls should be free.
+
+### Cause
+Saturated Habitat depth returns a finite near-max value; mapper treated it as a real hit.
+
+### Fix
+- `normalize_range` / `integrate_scan`: values within `free_near_eps` (0.5 m) of `range_max` clear free only
+- Habitat depth `near=0.1`, `far=10.0` to match laserscan `range_max`
+
+### Ops
+Stop → Run (engine reload required for max_depth).
+
+---
+
+## 2026-07-17 — Smear persists despite exact stamp match
+
+### Symptom
+FOV still smeared across yaw during bootstrap; mapper logged `No /odom with exact scan stamp` while cache was full.
+
+### Root causes
+1. Separate IPC `get_obs` + `get_pose` can disagree; timer also republished between turns with new stamps
+2. Pending scans dropped after 1s even when matching odom still existed; cache only 256
+3. Spiral guard treated tiny range noise as a “new” FOV and allowed re-integrate at new yaw
+
+### Fix
+- Engine `get_obs_and_pose` (atomic); bridge uses it; suppress timer publishes while DiscreteMove active
+- Mapper: OrderedDict stamp cache (2048), pending only drops when stamp older than oldest cached odom
+- Stronger `signatures_similar` smear guard
+
+### Ops
+**Stop Episode → Run** (reloads engine + bridge + mapper).
+
+---
+
+## 2026-07-17 — Exact odom/scan stamp match (no skew)
+
+### Symptom
+One laser FOV smeared across several yaw angles during the bootstrap spin.
+
+### Fix
+`find_pose_for_stamp` default and mapper `max_stamp_skew_sec` are **0** — only integrate when `/odom` and `/scan` share an identical stamp. Pending scans still wait for the matching odom.
+
+### Verified
+`test_find_pose_default_rejects_near_miss_negative` + exact-match positive.
+
+---
+
+## 2026-07-17 — Mapper skipped all scans (TF “future” extrapolation)
+
+### Symptom
+After rejecting stale-TF fallback, robot completed full 360° bootstrap with `/grid_map` only showing the original forward wedge. Logs: `Lookup would require extrapolation into the future` — scan stamp ~3–5s ahead of latest TF.
+
+### Root cause
+`known_pose_mapper` called `lookup_transform(..., timeout=0.25)` inside the scan callback on a **single-threaded** spin. That blocked the executor so `TransformListener` could not ingest `/tf`, TF never caught the scan stamp, and every integrate was skipped. (Previously the silent “latest TF” fallback hid this by painting at wrong yaw.)
+
+### Fix
+- Mapper integrates via **/odom stamp cache** (map≡odom), not blocking TF lookup; pending scans drain when matching odom arrives
+- Bridge JPEG writes moved to a background thread so they cannot stall odom/depth publish
+
+### Verified
+Unit tests for `find_pose_for_stamp` + existing sync suite.
+
+### Ops
+**Stop Episode → Run** to reload mapper + bridge.
+
+---
+
+## 2026-07-17 — Grid map yaw lag (~3s) while rotating
+
+### Symptom
+During Habitat rotation, `/grid_map` kept painting the depth FOV at the old (≈0°) heading for a few seconds; TF/robot marker then caught up and the map was already corrupted.
+
+### Root cause
+1. Bridge published **depth before odom/TF**, and JPEG writes on the bind mount delayed TF further.
+2. `known_pose_mapper` looked up TF at the scan stamp, then on failure **silently used latest TF** (stale yaw) → current FOV at wrong heading.
+
+### Fix
+- Publish odom/TF first, then RGB/depth/birdseye; JPEG last
+- Mapper: skip integrate when stamp TF lookup fails (no latest fallback)
+- Grid publish_hz 2 → 5 Hz
+
+### Verified
+`test_scan_to_occupancy.py` + `test_depth_camera_info_sync.py` (14 passed), including stamp-TF-before-depth and no-stale-fallback controls.
+
+### Ops
+**Stop Episode** then **Run** so bridge + mapper reload.
+
+---
+
+## 2026-07-17 — Conflicting duplicate robot sessions
+
+### Symptom
+Multiple Habitat/ROS stacks ran at once (duplicate `depth_to_laserscan`, `known_pose_mapper`, map→odom TF, etc.), so Stop Episode left processes alive and the next Run stacked on orphans.
+
+### Root cause
+Elytra `simTarget.stop()` only sent Ctrl-C and `tmux kill-session`. Orphans from `docker exec -d ros2 run …` (debug hot-swaps) and incomplete prior stops lived outside tmux. `start_sim.sh` only partially cleaned before launch.
+
+### Fix
+- `sim/scripts/cleanup_episode.sh` — soft then hard `pkill` of engine/viewer/ROS mission patterns + IPC socket
+- `stop_sim.sh` — Ctrl-C/kill tmux, then full cleanup (`CLEANUP_KILL_TMUX=1`)
+- `start_sim.sh` — cleanup before every launch
+- `project.yaml` `sim.stopScriptPath` → `/workspace/scripts/stop_sim.sh`
+- Elytra: load `stopScriptPath`; `simTarget`/`sshTarget` `.stop()` prefer that script
+
+### Verified
+- Elytra: `stopScriptPath.test.js` (22 suite tests green)
+- Container: `test_cleanup_episode.py` (5 passed); after `stop_sim.sh`, no leftover mapper/scan/engine procs
+
+### Ops
+**Stop Episode** then **Run Exploration Episode** for a single clean stack.
+
+---
+
+## 2026-07-17 — Spiral grid map: Habitat yaw/axes vs ROS
+
+### Symptom
+Robot looked stationary (or wrongly oriented) while `/grid_map` painted the depth wedge in a spiral around the robot.
+
+### Root cause
+`habitat_engine.get_pose()` used Habitat X/Z directly and `atan2(forward.x, -forward.z)`. That made:
+- ROS +X ≠ agent forward (agent looks −Z at spawn)
+- `turn_left` decrease reported yaw (CW in ROS) while depth stayed body-forward
+
+Known-pose mapper then integrated correct body-frame scans at the wrong world headings → spiral copies of the FOV.
+
+Secondary: bridge timer vs move callback could pair stale depth with fresh yaw (lock added).
+
+### Fix
+- ROS pose: `x=-hab_z`, `y=-hab_x`, `yaw=atan2(-fwd.x, -fwd.z)` so turn_left → +yaw and forward → +x
+- Bridge `_io_lock` around step + depth/odom publish
+- Mapper skips identical scan content when yaw jumps (spiral guard)
+
+### Verified
+- Unit: `test_habitat_ros_pose.py`, `test_scan_to_occupancy.py` spiral guards
+- IPC after engine reload: turn_left → positive Δyaw
+
+### Ops
+**Re-run the exploration episode** (engine must reload `get_pose`; kill orphan hot-swapped scan/mapper nodes). Do not keep the broken session.
+
+---
+
+### Decision
+Match real robot (T265 pose + depth/scan mapping): **no slam_toolbox**. Pose is privileged (Habitat GT / T265); `/grid_map` is built by raycasting `/scan` into an occupancy grid using map→base TF.
+
+### Changes
+- `known_pose_mapper_node` + `scan_to_occupancy.py` (Bresenham integrate)
+- Launch: static `map`→`odom` identity; remove slam_toolbox lifecycle
+- Depth scan pipeline kept (center band, FOV-only, NaN uncovered, range 10 m)
+- Design doc + explore_node wait messages updated
+
+### Verified
+- Unit: `test_scan_to_occupancy.py` (rotate-in-place accumulates bearings)
+- Live hot-swap: slam absent; after 360° known cells **9.8k → 57k**
+
+### Ops
+Re-run exploration episode for a clean stack (launch no longer starts slam).
+
+---
+
+### Symptom
+Grid only showed a thin forward wedge; did not grow during the bootstrap 360°; looked like bad laser ranges.
+
+### Root cause chain
+| # | Bug | Effect |
+|---|-----|--------|
+| 1 | `band_anchor: bottom` on 0.1 m camera | Floor (~0.26 m) published as obstacles |
+| 2 | Uncovered 360° bins filled with `clear_range` | Every scan ≈ identical free circle → bad SLAM matching |
+| 3 | Jazzy `slam_toolbox` `shouldProcessScan` drops **pure rotation** unless `check_min_dist_and_heading_precisely: true` | Map frozen during in-place 360° (translation still worked) |
+
+### Fix
+- Scan: `band_anchor: center`, uncovered bins → **NaN**, `range_max: 10`, FOV-only (`full_360: false`)
+- SLAM: `check_min_dist_and_heading_precisely: true`, `use_scan_matching: false`, `max_laser_range: 10`, loop closing off for bootstrap
+- Nav2 obstacle/raytrace ranges → 10 m
+- Tests: scan NaN/FOV, `test_slam_spin_params.py`
+
+### Verified (live)
+```
+before 360: known≈8397
+after  360: known≈41389  (free 8k→39k, occ 214→2150)
+```
+
+### Ops
+Re-run exploration episode so launch picks up YAML + scan node defaults. Hot `ros2 param set` alone does **not** fix #3 (thresholds cached in process).
+
+### Did not work
+- Assuming ranges were NaN/zero from the UI
+- Disabling scan matching alone without the precise heading flag
+- Runtime-only travel threshold changes without restarting slam_toolbox
+
+---
+
+## 2026-07-17 — Grid map empty: floor band mistaken for laser hits
+
+### Symptom
+Episode spun 360°, explore exited in ~4s, grid map stayed almost all unknown (`-1`). UI looked like laser ranges were 0/NaN.
+
+### What it actually was
+`/scan` was finite and non-zero, but **wrong**: `band_anchor: bottom` on a level camera at 0.1 m made the bottom 24 depth rows the **floor** (~0.26–0.36 m). Those near hits were published as obstacles; center rows had real walls (~4–5 m). SLAM built a tiny poisoned map (~25 free / 11 occ).
+
+| Band | Hits | Ranges |
+|------|------|--------|
+| bottom (bug) | 91 | 0.26–0.36 m (floor) |
+| center (fix) | 38 | 4.2–5.0 m (walls), 0 floorish |
+
+TF/`/odom` were fine (`map→odom→base_link` present). July-4 verification that celebrated `min≈0.26 m, 91 hits` was this floor artifact.
+
+### Fix
+- Default `band_anchor` → **`center`** in `nav2_exploration.launch.py` + `depth_to_laserscan_node.py`
+- Regression tests: `test_scan_from_depth.py` (Habitat-like floor vs wall), `test_depth_scan_range.py`
+
+### Verified
+- Unit: 9/9 `test_scan_from_depth.py`; sim script tests pass
+- Live hot-restart with `band=center`: `floorish(<0.5)=0`, wall hits ~4.2 m; after slam reset + motion, free cells grew (183→315) and occ appeared
+
+### Ops
+Re-run exploration episode so launch picks up `center` (hot param set alone does not reload cached node state). Optional: `/slam_toolbox/reset` if an old bottom-band map is still loaded.
+
+### Did not work
+- Assuming NaN/zero ranges from the UI alone — always sample `/scan` + depth row bands first.
+
+---
+
 ## 2026-07-04 — SLAM bootstrap + 360° depth scan fixes (episode runs end-to-end)
 
 ### Symptom

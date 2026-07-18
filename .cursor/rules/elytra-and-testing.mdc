@@ -1,0 +1,174 @@
+---
+description: Elytra Bridge startup/shutdown and project testing conventions (positive/negative controls). Use when starting the dev stack, connecting sim, writing tests, or debugging behavior.
+alwaysApply: true
+---
+
+# Elytra Bridge + project testing
+
+## Start Elytra Bridge (dev)
+
+From repo root `new_vlm_exploration/`:
+
+```bash
+cd elytra-bridge/application
+cp backend/.env.example backend/.env   # first time only
+npm run dev
+```
+
+- **Frontend:** http://localhost:5173
+- **Backend:** http://localhost:8787
+- `predev` runs `ensure-single-instance.js` — kills stale processes on 5173/8787.
+- If ports are stuck: stop extra `node`/`vite` on those ports before restarting.
+
+**Do not** run a second Elytra instance on the same ports. For a parallel clone, use different ports (e.g. 8788 / 5174).
+
+## Start Habitat sim container
+
+```bash
+cd habitat3-exploration/sim/docker
+docker compose --env-file ../.env up -d sim
+```
+
+- Container name: `habitat3-sim` (compose service **must** be named `sim`).
+- **noVNC:** http://localhost:6080
+- **View server (multi-panel):** port 8090 inside container
+- Copy `habitat3-exploration/sim/.env.example` → `sim/.env` for VLM/Ollama overrides. **Never commit `sim/.env`** (API keys).
+
+Optional local Ollama (Windows host, before VLM episodes):
+
+```bash
+ollama pull qwen3-vl:4b-instruct
+```
+
+## Connect + run episode (UI)
+
+1. Open Elytra UI → select **habitat3-exploration** → mode **sim**.
+2. **Connect** — backend runs `docker compose build/up` and adopts session.
+3. **Run Exploration Episode** — runs `start_sim.sh` in tmux session `habitat`.
+
+CLI connect (equivalent):
+
+```bash
+curl -X POST http://localhost:8787/drone/connect \
+  -H "Content-Type: application/json" \
+  -d '{"projectId":"habitat3-exploration","mode":"sim","projectRoot":"C:/Users/isaac/Desktop/Research/new_vlm_exploration/habitat3-exploration"}'
+```
+
+## Rebuild ROS after C++ changes
+
+Inside container (bind-mounted `src/`):
+
+```bash
+docker exec habitat3-sim bash -lc \
+  'source /opt/ros/jazzy/setup.bash && cd /opt/explorer_workspace/ros_workspace && \
+   colcon build --packages-select explorer_mission --symlink-install'
+```
+
+`compose down` recreates from image — C++ fixes need image rebuild **or** in-container `colcon build`. Python under `sim/scripts/` is bind-mounted live.
+
+## Shutdown (end of session)
+
+```bash
+cd habitat3-exploration/sim/docker
+docker compose --env-file ../.env down
+```
+
+Stop Elytra: Ctrl+C in the `npm run dev` terminal (or kill node on 5173/8787).
+
+---
+
+## Testing: positive and negative controls
+
+When adding or fixing **behavior**, pair every positive test with at least one negative control. Also add **harness meta-tests** so a broken runner does not produce false confidence.
+
+| Control | Purpose | Must |
+|---------|---------|------|
+| **Positive** | Happy path — feature works when inputs are valid | Pass |
+| **Negative** | Invalid input / edge case — feature fails safely or rejects | Pass (expects error/empty/false) |
+| **Harness** | `1+1==2` plus intentional failure wrapped in `raises` | Pass |
+
+Name tests explicitly: `*_positive`, `*_negative`, or describe behavior + condition.
+
+### Elytra (Node `node:test`)
+
+Location: `elytra-bridge/application/backend/test/*.test.js`
+
+```javascript
+describe("myFeature harness", () => {
+  it("positive control: runner executes assertions", () => {
+    assert.equal(1 + 1, 2);
+  });
+  it("negative control: intentional failure is detectable", () => {
+    assert.throws(() => assert.equal(1, 2), assert.AssertionError);
+  });
+});
+
+it("accepts valid input (positive control)", () => { /* ... */ });
+it("rejects bad input (negative control)", () => { /* assert ok === false or throws */ });
+```
+
+Run: `cd elytra-bridge/application && npm test`
+
+Reference: `backend/test/simViews.test.js`
+
+### Habitat mission (pytest)
+
+Location: `habitat3-exploration/ros_workspace/src/explorer_mission/test_py/`
+
+```python
+def test_feature_positive():
+    assert parse_leading_int("2\nbecause") == 2
+
+def test_feature_negative():
+    with pytest.raises(ValueError, match="not in candidates"):
+        validate_frontier_choice(4, [0, 1])
+
+def test_harness_negative_control():
+    with pytest.raises(AssertionError):
+        assert 1 == 2
+```
+
+Run in container (use **system** Python, not conda):
+
+```bash
+docker exec habitat3-sim bash -lc \
+  'source /opt/ros/jazzy/setup.bash && source /opt/explorer_workspace/ros_workspace/install/setup.bash && \
+   /usr/bin/python3 -m pytest src/explorer_mission/test_py/ -q'
+```
+
+Reference: `test_vlm_parsing.py`, `test_vlm_node.py`, `test_harness_controls.py`
+
+### Habitat mission (gtest C++)
+
+Location: `habitat3-exploration/ros_workspace/src/explorer_mission/test/`
+
+```cpp
+TEST(FrontierDetection, RevealedDiscHasFrontier) { /* positive */ }
+TEST(FrontierDetection, FullyKnownMapHasNoFrontier_NegativeControl) { /* negative */ }
+```
+
+Run: `habitat3-exploration/sim/scripts/run_ros_tests.sh` (in container) or `colcon test --packages-select explorer_mission`
+
+### Python sim scripts (standalone)
+
+Location: `habitat3-exploration/sim/scripts/test_*.py` — pure logic, no ROS import when possible.
+
+## TDD workflow for this repo
+
+1. **RED** — write failing positive + negative test (mock HTTP for VLM/Ollama; no real Ollama in CI).
+2. **GREEN** — minimal fix.
+3. **REFACTOR** — keep tests green.
+
+For bugs: reproduce with a negative control first, then fix. See also `test-driven-development.mdc` and `testing-patterns.mdc`.
+
+## Mock boundaries
+
+| Mock | Do not mock |
+|------|-------------|
+| Ollama/Gemini HTTP | `parse_leading_int`, pure geometry |
+| Docker/SSH in Elytra integration | `normalizeViews`, view URL builders |
+| Habitat IPC in bridge tests | `frontier_detection` math on synthetic grids |
+
+## Journal
+
+Log session outcomes in `JOURNAL.md` (dated section at top): symptoms, root cause, fix, what did *not* work.
