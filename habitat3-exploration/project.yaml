@@ -96,11 +96,19 @@ views:
     label: RGB Camera
     type: ros-image
     topic: /image_data
+  - id: depth-debug
+    label: Depth Debug
+    type: ros-image
+    topic: /depth_data
   - id: grid-map
     label: Grid Map
     type: ros-compressed
-    topic: /map_renderer/map_img
+    topic: /map_renderer/grid_img
   - id: nav-plan-map
     label: Nav Plan (Bird's Eye)
     type: ros-compressed
-    topic: /map_renderer/map_img
+    topic: /map_renderer/nav_plan_img
+  - id: current-frontier
+    label: Current Frontier (VLM)
+    type: ros-compressed
+    topic: /exploration/debug/current_frontier_img

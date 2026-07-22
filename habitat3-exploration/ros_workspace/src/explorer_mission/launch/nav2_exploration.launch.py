@@ -39,9 +39,9 @@ def generate_launch_description() -> LaunchDescription:
     nav2_navigation = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
             PathJoinSubstitution([
-                FindPackageShare("nav2_bringup"),
+                FindPackageShare("explorer_mission"),
                 "launch",
-                "navigation_launch.py",
+                "navigation_sim.launch.py",
             ])
         ]),
         launch_arguments={
@@ -95,8 +95,9 @@ def generate_launch_description() -> LaunchDescription:
                 "range_max": 10.0,
                 "scan_height": 24,
                 "full_360": False,
-                "band_anchor": "center",
-                "free_near_eps": 2.5,
+                "band_anchor": "upper_third",
+                "sensor_far": 50.0,
+                "sat_eps": 0.5,
             }],
             output="screen",
         ),
@@ -117,7 +118,7 @@ def generate_launch_description() -> LaunchDescription:
                 "max_stamp_skew_sec": 0.0,
                 "odom_cache_size": 2048,
                 "pending_scan_limit": 128,
-                "free_near_max_eps": 2.5,
+                "obstacle_inflation_m": 0.10,
             }],
             output="screen",
         ),
@@ -135,6 +136,8 @@ def generate_launch_description() -> LaunchDescription:
                 "realtime_mode": realtime_mode,
                 "realtime_max_linear_m_s": 0.1,
                 "realtime_max_angular_deg_s": 30.0,
+                "angular_threshold": 0.05,
+                "linear_threshold": 0.03,
             }],
             output="screen",
         ),

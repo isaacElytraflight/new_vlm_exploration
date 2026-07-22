@@ -6,6 +6,7 @@ import base64
 import io
 import json
 import re
+from dataclasses import dataclass
 
 from sensor_msgs.msg import CompressedImage
 
@@ -23,18 +24,77 @@ def parse_leading_int(s: str) -> int:
     return int(match.group(1))
 
 
+def _clamp_openness(score: int) -> int:
+    return max(0, min(5, int(score)))
+
+
+def _score_from_json_obj(payload: object) -> int | None:
+    if isinstance(payload, dict) and "score" in payload:
+        return _clamp_openness(int(payload["score"]))
+    return None
+
+
 def parse_openness_score(s: str) -> int:
-    """Parse a 0-5 openness score from JSON or plain text VLM output."""
+    """Parse a 0-5 openness score from JSON or plain text VLM output.
+
+    Tolerates truncated JSON (common when the local VLM hits ``num_predict``)
+    by extracting a ``"score": N`` field with a regex before falling back to
+    the first integer in the string.
+    """
+    return parse_openness_result(s).score
+
+
+def parse_openness_reasoning(s: str) -> str:
+    """Extract reasoning text from a VLM openness reply (may be empty)."""
+    return parse_openness_result(s).reasoning
+
+
+@dataclass(frozen=True)
+class OpennessResult:
+    score: int
+    reasoning: str = ""
+
+
+def _reasoning_from_json_obj(payload: object) -> str:
+    if isinstance(payload, dict) and "reasoning" in payload:
+        return str(payload["reasoning"]).strip()
+    return ""
+
+
+def parse_openness_result(s: str) -> OpennessResult:
+    """Parse score + optional reasoning from JSON or plain text VLM output."""
     text = s.strip()
+    if not text:
+        raise ValueError("Empty VLM response")
+
+    score: int | None = None
+    reasoning = ""
+
     try:
         payload = json.loads(text)
-        if isinstance(payload, dict) and "score" in payload:
-            score = int(payload["score"])
-            return max(0, min(5, score))
+        score = _score_from_json_obj(payload)
+        reasoning = _reasoning_from_json_obj(payload)
     except (json.JSONDecodeError, TypeError, ValueError):
-        pass
-    score = parse_leading_int(text)
-    return max(0, min(5, score))
+        payload = None
+
+    if score is None:
+        match = re.search(r'"score"\s*:\s*(-?\d+)', text, flags=re.IGNORECASE)
+        if match:
+            score = _clamp_openness(int(match.group(1)))
+        else:
+            score = _clamp_openness(parse_leading_int(text))
+
+    if not reasoning:
+        # Truncated JSON: "reasoning": "partial sentence...
+        rm = re.search(
+            r'"reasoning"\s*:\s*"((?:\\.|[^"\\])*)',
+            text,
+            flags=re.IGNORECASE,
+        )
+        if rm:
+            reasoning = rm.group(1).replace('\\"', '"').strip()
+
+    return OpennessResult(score=int(score), reasoning=reasoning)
 
 
 def validate_frontier_choice(chosen: int, candidate_ids: list[int]) -> int:

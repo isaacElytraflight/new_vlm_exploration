@@ -204,6 +204,40 @@ def _bresenham(r0: int, c0: int, r1: int, c1: int) -> list[tuple[int, int]]:
     return cells
 
 
+def inflate_occupied(
+    data: np.ndarray,
+    *,
+    radius_cells: int,
+) -> np.ndarray:
+    """Return a copy of ``data`` with OCCUPIED cells expanded by ``radius_cells``.
+
+    Used at publish time so raycasting still clears thin hits, while frontiers
+    and Nav2 see ~inflated walls (e.g. 0.10 m → 2 cells at 5 cm resolution).
+    """
+    if radius_cells <= 0:
+        return np.array(data, copy=True)
+    out = np.array(data, copy=True, dtype=np.int8)
+    ys, xs = np.where(data == OCCUPIED)
+    if ys.size == 0:
+        return out
+    h, w = out.shape
+    r = int(radius_cells)
+    for y, x in zip(ys.tolist(), xs.tolist()):
+        y0 = max(0, y - r)
+        y1 = min(h, y + r + 1)
+        x0 = max(0, x - r)
+        x1 = min(w, x + r + 1)
+        out[y0:y1, x0:x1] = OCCUPIED
+    return out
+
+
+def inflation_radius_cells(resolution: float, radius_m: float) -> int:
+    """Ceil(radius_m / resolution); 0 when radius_m <= 0."""
+    if radius_m <= 0 or resolution <= 0:
+        return 0
+    return int(math.ceil(radius_m / resolution))
+
+
 def integrate_scan(
     grid: OccupancyMap,
     *,
@@ -213,24 +247,18 @@ def integrate_scan(
     angles: list[float] | np.ndarray,
     range_min: float,
     range_max: float,
-    free_near_max_eps: float = 2.5,
 ) -> None:
     """Raycast scan into grid. Pose is trusted (T265 / Habitat GT); no scan matching.
 
-    Ranges within ``free_near_max_eps`` of ``range_max`` clear free space only —
-    they are treated as sensor clip / no-return, not obstacle hits.
-
-    Free cells along a ray overwrite prior occupied (so corrected clip rays erase
-    fake max-range walls from earlier poses).
-
-    The grid is expanded for all ray endpoints *before* raycasting so
-    ``world_to_cell`` stays consistent (mid-scan expand used to leave a stale
-    robot cell and paint a huge free triangle).
+    Exact ``range_max`` clears free space only (mapping horizon). Non-finite ranges
+    are skipped (UNKNOWN). Free cells overwrite prior occupied. The grid is expanded
+    for all endpoints *before* Bresenham so the robot cell stays stable.
     """
     if len(ranges) != len(angles):
         raise ValueError("ranges and angles length mismatch")
 
-    free_eps = max(float(free_near_max_eps), grid.resolution * 0.5, 1e-3)
+    # Tiny eps so float range_max is treated as a free horizon, not a hit.
+    free_eps = max(grid.resolution * 0.5, 1e-3)
     grid.ensure_contains(robot_x, robot_y, margin_m=max(grid.resolution * 4.0, 0.2))
 
     prepared: list[tuple[float, float, float, float, bool]] = []
@@ -246,7 +274,6 @@ def integrate_scan(
         grid.ensure_contains(end_x, end_y, margin_m=grid.resolution * 2)
         prepared.append((end_x, end_y, float(angle), use_range, is_hit))
 
-    # Origin is now stable for this scan.
     rr, rc = grid.world_to_cell(robot_x, robot_y)
     for end_x, end_y, _angle, _use_range, is_hit in prepared:
         er, ec = grid.world_to_cell(end_x, end_y)

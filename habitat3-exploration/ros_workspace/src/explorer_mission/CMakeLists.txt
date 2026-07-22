@@ -96,6 +96,11 @@ install(PROGRAMS
   DESTINATION lib/${PROJECT_NAME}
   RENAME vlm_node)
 
+install(PROGRAMS
+  explorer_mission/current_frontier_view_node.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME current_frontier_view_node)
+
 install(DIRECTORY include/
   DESTINATION include)
 

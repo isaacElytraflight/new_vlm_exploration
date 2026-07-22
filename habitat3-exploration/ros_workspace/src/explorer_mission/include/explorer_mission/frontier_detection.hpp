@@ -36,6 +36,7 @@ std::vector<std::vector<cv::Point>> findFrontierContoursMasked(
   int min_length_pixels = 20);
 
 /// Keep contours whose world centroid is within radius_m of robot_pos.
+/// If ``radius_m <= 0``, keep all contours (no distance filter).
 std::vector<std::vector<cv::Point>> filterContoursNearRobot(
   const std::vector<std::vector<cv::Point>> & contours,
   const nav_msgs::msg::OccupancyGrid & grid,

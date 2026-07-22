@@ -24,7 +24,7 @@ class CmdVelToDiscreteNode(Node):
         super().__init__("cmd_vel_to_discrete")
         self.declare_parameter("cmd_vel_topic", "/cmd_vel")
         self.declare_parameter("action_name", "/movement/discrete_move")
-        self.declare_parameter("angular_threshold", 0.15)
+        self.declare_parameter("angular_threshold", 0.05)
         self.declare_parameter("linear_threshold", 0.03)
         self.declare_parameter("dispatch_rate_hz", 20.0)
         self.declare_parameter("min_command_interval", 0.15)

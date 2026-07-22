@@ -26,6 +26,8 @@ from std_msgs.msg import Header
 
 from explorer_bridge.scan_to_occupancy import (
     OccupancyMap,
+    inflate_occupied,
+    inflation_radius_cells,
     integrate_scan,
     scan_content_signature,
     should_integrate_scan,
@@ -53,7 +55,7 @@ class KnownPoseMapperNode(Node):
         self.declare_parameter("odom_cache_size", 2048)
         self.declare_parameter("max_stamp_skew_sec", 0.0)
         self.declare_parameter("pending_scan_limit", 128)
-        self.declare_parameter("free_near_max_eps", 2.5)
+        self.declare_parameter("obstacle_inflation_m", 0.10)
 
         scan_topic = str(self.get_parameter("scan_topic").value)
         odom_topic = str(self.get_parameter("odom_topic").value)
@@ -66,7 +68,8 @@ class KnownPoseMapperNode(Node):
         skew_sec = max(0.0, float(self.get_parameter("max_stamp_skew_sec").value))
         self._max_skew_ns = int(skew_sec * 1_000_000_000)
         pending_limit = max(1, int(self.get_parameter("pending_scan_limit").value))
-        self._free_near_max_eps = max(0.0, float(self.get_parameter("free_near_max_eps").value))
+        inflation_m = max(0.0, float(self.get_parameter("obstacle_inflation_m").value))
+        self._inflate_cells = inflation_radius_cells(resolution, inflation_m)
 
         self._grid = OccupancyMap(resolution=resolution, initial_size_m=initial_size)
         self._last_sig: tuple | None = None
@@ -86,7 +89,8 @@ class KnownPoseMapperNode(Node):
         self.create_subscription(LaserScan, scan_topic, self._scan_cb, qos_profile_sensor_data)
         self.create_timer(1.0 / publish_hz, self._publish)
         self.get_logger().info(
-            f"Known-pose mapper: {scan_topic} + {odom_topic} (exact stamp) → {grid_topic}"
+            f"Known-pose mapper: {scan_topic} + {odom_topic} (exact stamp) → {grid_topic} "
+            f"(obstacle_inflation={inflation_m:.2f}m / {self._inflate_cells} cells)"
         )
 
     def _odom_cb(self, msg: Odometry) -> None:
@@ -166,7 +170,6 @@ class KnownPoseMapperNode(Node):
             angles=angles,
             range_min=float(msg.range_min),
             range_max=float(msg.range_max),
-            free_near_max_eps=self._free_near_max_eps,
         )
         self._last_sig = sig
         self._last_yaw = yaw
@@ -186,7 +189,8 @@ class KnownPoseMapperNode(Node):
         info.origin.position.y = self._grid.origin_y
         info.origin.orientation.w = 1.0
         msg.info = info
-        msg.data = self._grid.data.flatten().tolist()
+        published = inflate_occupied(self._grid.data, radius_cells=self._inflate_cells)
+        msg.data = published.flatten().tolist()
         self._pub.publish(msg)
 
 

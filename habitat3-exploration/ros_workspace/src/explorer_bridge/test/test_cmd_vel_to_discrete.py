@@ -28,10 +28,32 @@ def test_cmd_vel_turn_left_positive():
     assert intent.steps == 1
 
 
+def test_cmd_vel_slow_rotate_accepted_positive():
+    """Nav2 RPP often emits ~0.1 rad/s while aligning; must still discrete-turn."""
+    intent = cmd_vel_to_intent(0.0, 0.1)
+    assert intent is not None
+    assert intent.direction == DiscreteMove.Goal.TURN_LEFT
+
+
 def test_cmd_vel_forward_positive():
     intent = cmd_vel_to_intent(0.2, 0.0)
     assert intent is not None
     assert intent.direction == DiscreteMove.Goal.FORWARD
+
+
+def test_cmd_vel_drive_with_curvature_prefers_forward_positive():
+    """RPP path follow: linear + mild angular must step forward, not spin-jitter."""
+    intent = cmd_vel_to_intent(0.25, 0.12)
+    assert intent is not None
+    assert intent.direction == DiscreteMove.Goal.FORWARD
+
+
+def test_cmd_vel_curvature_must_not_force_turn_negative():
+    """Negative: old angular-first priority caused align-then-step jitter."""
+    intent = cmd_vel_to_intent(0.25, 0.12)
+    assert intent is not None
+    assert intent.direction != DiscreteMove.Goal.TURN_LEFT
+    assert intent.direction != DiscreteMove.Goal.TURN_RIGHT
 
 
 def test_cmd_vel_below_threshold_negative():

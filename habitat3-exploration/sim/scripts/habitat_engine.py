@@ -65,10 +65,9 @@ def make_sim() -> habitat_sim.Simulator:
     depth.sensor_type = habitat_sim.SensorType.DEPTH
     depth.resolution = [480, 640]
     depth.position = [0.0, 0.1, 0.0]
-    # Explicit far clip so saturated far depths land at `far` and can be treated
-    # as free (not a fake wall ring) by the laserscan → occupancy path.
+    # Far plane above room-scale walls; voids saturate near far → NaN in scan path.
     depth.near = 0.1
-    depth.far = 10.0
+    depth.far = 50.0
 
     birdseye = habitat_sim.CameraSensorSpec()
     birdseye.uuid = "birdseye"

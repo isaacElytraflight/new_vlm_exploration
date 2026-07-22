@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render occupancy grid with frontier tree, trajectory, and plan overlays."""
+"""Render occupancy grid: plain grid view + annotated nav-plan view."""
 
 from __future__ import annotations
 
@@ -21,6 +21,42 @@ from explorer_msgs.msg import FrontierTree
 NOT_RATED = 255
 
 
+def openness_label_text(score: int) -> str | None:
+    """Return 0–5 label for a rated frontier; None if not yet rated."""
+    if score == NOT_RATED:
+        return None
+    return str(int(score))
+
+
+def occupancy_to_bgr(grid: np.ndarray) -> np.ndarray:
+    """Occupancy grid → BGR image (flipped horizontally). No overlays."""
+    if grid.size == 0:
+        return np.zeros((0, 0, 3), dtype=np.uint8)
+    gray = np.where(grid == -1, 127, np.where(grid > 50, 0, 255)).astype(np.uint8)
+    color = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    return cv2.flip(color, 1)
+
+
+def encode_png(bgr: np.ndarray) -> bytes:
+    ok, buf = cv2.imencode(".png", bgr)
+    if not ok:
+        raise RuntimeError("PNG encode failed")
+    return buf.tobytes()
+
+
+def crop_to_content(color: np.ndarray, *, crop_margin_px: int = 10) -> np.ndarray:
+    mask = np.any(color != 127, axis=2)
+    ys, xs = np.where(mask)
+    if not xs.size or not ys.size:
+        return color
+    m = crop_margin_px
+    y0 = max(int(ys.min()) - m, 0)
+    y1 = min(int(ys.max()) + m, color.shape[0] - 1)
+    x0 = max(int(xs.min()) - m, 0)
+    x1 = min(int(xs.max()) + m, color.shape[1] - 1)
+    return color[y0 : y1 + 1, x0 : x1 + 1]
+
+
 class MapRenderNode(Node):
     def __init__(self) -> None:
         super().__init__("map_renderer")
@@ -35,6 +71,11 @@ class MapRenderNode(Node):
         self.trajectory: list[tuple[dict, float]] = []
         self.map_lock = Lock()
 
+        # Plain occupancy (dashboard Grid Map).
+        self.grid_pub = self.create_publisher(CompressedImage, "map_renderer/grid_img", 1)
+        # Annotated nav plan (dashboard Nav Plan).
+        self.nav_pub = self.create_publisher(CompressedImage, "map_renderer/nav_plan_img", 1)
+        # Back-compat alias used by older view configs.
         self.pub = self.create_publisher(CompressedImage, "map_renderer/map_img", 1)
 
         self.map_sub = self.create_subscription(
@@ -95,6 +136,18 @@ class MapRenderNode(Node):
             1.0 - 2.0 * (q.y * q.y + q.z * q.z))
         return x, y, math.degrees(yaw)
 
+    def render_grid_only(self, *, crop_margin_px: int = 10) -> np.ndarray:
+        """Occupancy only — no frontiers, plans, trajectory, or robot."""
+        with self.map_lock:
+            if self.map_arr is None:
+                raise RuntimeError("No /grid_map message received yet.")
+            grid = self.map_arr.copy()
+        color = occupancy_to_bgr(grid)
+        color = crop_to_content(color, crop_margin_px=crop_margin_px)
+        footer_h = 20
+        return cv2.copyMakeBorder(
+            color, 0, footer_h, 0, 0, cv2.BORDER_CONSTANT, value=(127, 127, 127))
+
     def overlay_map(
         self,
         robot_color=(0, 0, 255),
@@ -121,10 +174,7 @@ class MapRenderNode(Node):
             h, w = self.map_arr.shape
 
         robot_x, robot_y, robot_yaw_deg = self.get_pose()
-
-        gray = np.where(grid == -1, 127, np.where(grid > 50, 0, 255)).astype(np.uint8)
-        color = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-        color = cv2.flip(color, 1)
+        color = occupancy_to_bgr(grid)
 
         def world_to_flipped_pixel(wx, wy):
             col = int(round((wx - ox) / res))
@@ -145,10 +195,11 @@ class MapRenderNode(Node):
                     dot_color = node_color
                 radius = current_node_radius if node.id == current_id else node_radius
                 cv2.circle(color, (px, py), radius, dot_color, -1)
-                if node.openness_score != NOT_RATED:
-                    label = str(node.openness_score)
-                    cv2.putText(color, label, (px - 2, py + 2), font, 0.4, (0, 0, 0), 2, cv2.LINE_AA)
-                    cv2.putText(color, label, (px - 2, py + 2), font, 0.4, label_color, 1, cv2.LINE_AA)
+                label = openness_label_text(int(node.openness_score))
+                if label is not None:
+                    tx, ty = px - 4, py - radius - 4
+                    cv2.putText(color, label, (tx, ty), font, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
+                    cv2.putText(color, label, (tx, ty), font, 0.55, label_color, 1, cv2.LINE_AA)
 
         if len(self.trajectory) > 1:
             pixel_points = [world_to_flipped_pixel(pos["x"], pos["y"]) for pos, _yaw in self.trajectory]
@@ -178,43 +229,36 @@ class MapRenderNode(Node):
             color, (rpx, rpy), (int(rpx + dx_px), int(rpy + dy_px)),
             arrow_color, 2, tipLength=0.3)
 
-        mask = np.any(color != 127, axis=2)
-        ys, xs = np.where(mask)
-        if xs.size and ys.size:
-            m = crop_margin_px
-            y0 = max(int(ys.min()) - m, 0)
-            y1 = min(int(ys.max()) + m, color.shape[0] - 1)
-            x0 = max(int(xs.min()) - m, 0)
-            x1 = min(int(xs.max()) + m, color.shape[1] - 1)
-            color = color[y0:y1 + 1, x0:x1 + 1]
-
+        color = crop_to_content(color, crop_margin_px=crop_margin_px)
         footer_h = 20
         color = cv2.copyMakeBorder(
             color, 0, footer_h, 0, 0, cv2.BORDER_CONSTANT, value=(127, 127, 127))
         return color
 
+    def _publish_png(self, publisher, bgr: np.ndarray) -> None:
+        msg = CompressedImage()
+        with self.map_lock:
+            if self.map_msg is not None:
+                msg.header = self.map_msg.header
+        msg.format = "png"
+        msg.data = encode_png(bgr)
+        publisher.publish(msg)
+
     def render_and_publish(self) -> None:
         if self.map_arr is None:
             return
         try:
+            grid_img = self.render_grid_only()
+            self._publish_png(self.grid_pub, grid_img)
+
             x, y, yaw = self.get_pose()
             self.trajectory.append(({"x": x, "y": y}, yaw))
-            color = self.overlay_map()
+            nav_img = self.overlay_map()
+            self._publish_png(self.nav_pub, nav_img)
+            self._publish_png(self.pub, nav_img)
         except Exception as exc:
             self.get_logger().warn(f"Render failed: {exc}")
             return
-
-        ok, buf = cv2.imencode(".png", color)
-        if not ok:
-            self.get_logger().warn("PNG encode failed")
-            return
-
-        msg = CompressedImage()
-        with self.map_lock:
-            msg.header = self.map_msg.header
-        msg.format = "png"
-        msg.data = buf.tobytes()
-        self.pub.publish(msg)
 
     def tick(self) -> None:
         self.render_and_publish()

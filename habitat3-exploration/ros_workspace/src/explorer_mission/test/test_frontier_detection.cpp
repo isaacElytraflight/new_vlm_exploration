@@ -115,6 +115,45 @@ TEST(FrontierDetection, FilterContoursNearRobot_negative)
   EXPECT_TRUE(near.empty());
 }
 
+TEST(FrontierDetection, FilterContoursUnlimitedRadius_positive)
+{
+  // radius <= 0 means keep all (do not wipe the set).
+  const auto grid = makeTestGrid();
+  const cv::Point2f robot(0.5f, 0.5f);
+  const auto contours = explorer_mission::findFrontierContours(grid, 5);
+  ASSERT_FALSE(contours.empty());
+  const auto all = explorer_mission::filterContoursNearRobot(contours, grid, robot, 0.0);
+  EXPECT_EQ(all.size(), contours.size());
+}
+
+TEST(FrontierDetection, BootstrapExclusion5mWipesRing_negative)
+{
+  // Revealed disc radius 80 px * 0.05 = 4 m; 5 m exclusion around robot wipes it.
+  const auto grid = makeRevealedDiscGrid(200, 80.0, false);
+  const double res = grid.info.resolution;
+  const cv::Point2f robot(
+    static_cast<float>(grid.info.width * 0.5 * res),
+    static_cast<float>(grid.info.height * 0.5 * res));
+
+  const auto mask = explorer_mission::buildExclusionMask(grid, {robot}, 5.0);
+  const auto contours = explorer_mission::findFrontierContoursMasked(grid, mask, 10);
+  EXPECT_TRUE(contours.empty()) << "5 m exclusion around robot should wipe ~4 m frontier ring";
+}
+
+TEST(FrontierDetection, BootstrapSmallExclusionKeepsRing_positive)
+{
+  const auto grid = makeRevealedDiscGrid(200, 80.0, false);
+  const double res = grid.info.resolution;
+  const cv::Point2f robot(
+    static_cast<float>(grid.info.width * 0.5 * res),
+    static_cast<float>(grid.info.height * 0.5 * res));
+
+  const auto mask = explorer_mission::buildExclusionMask(grid, {robot}, 1.0);
+  const auto contours = explorer_mission::findFrontierContoursMasked(grid, mask, 10);
+  const auto near = explorer_mission::filterContoursNearRobot(contours, grid, robot, 50.0);
+  EXPECT_FALSE(near.empty()) << "1 m exclusion + 50 m keep should retain frontiers";
+}
+
 TEST(FrontierDetection, ExclusionMaskBlocksExistingNode_negative)
 {
   const auto grid = makeTestGrid();

@@ -14,7 +14,7 @@ from explorer_msgs.action import RateFrontierOpenness
 from explorer_mission.vlm.backends import get_backend
 from explorer_mission.vlm.backends.ollama import OllamaBackendError
 from explorer_mission.vlm.gemini_auth import GeminiApiKeyError
-from explorer_mission.vlm.parsing import parse_openness_score
+from explorer_mission.vlm.parsing import parse_openness_result
 
 OPENNESS_PROMPT = (
     "You are a small, ground-based exploration robot mapping the inside of a building. "
@@ -45,11 +45,11 @@ OPENNESS_PROMPT = (
     "    * *Visual Cues:* An open exit leading outdoors, a loading dock opening to the outside, "
     "or a massive warehouse-scale environment.\n\n"
     "### OUTPUT FORMAT:\n"
-    "Output your response as a single JSON object containing your reasoning and the final integer score. "
-    "Do not include any other text.\n\n"
+    "Reply with a single JSON object. Put the integer score FIRST so short replies "
+    "still parse if truncated. No markdown fences, no other text.\n\n"
     "{\n"
-    "  \"reasoning\": \"Brief description of what is seen in the frontier\",\n"
-    "  \"score\": [Integer from 0 to 5]\n"
+    "  \"score\": <integer 0-5>,\n"
+    "  \"reasoning\": \"one short sentence\"\n"
     "}"
 )
 
@@ -77,14 +77,28 @@ class VlmNode(Node):
     def cancel_callback(self, _goal_handle) -> CancelResponse:
         return CancelResponse.ACCEPT
 
-    def _rate_one(self, frontier_id: int, image) -> tuple[int, int]:
-        response = self._backend.query(
-            OPENNESS_PROMPT,
-            [(f"Frontier {frontier_id}.", image)],
+    def _rate_one(self, frontier_id: int, image) -> tuple[int, int, str]:
+        reasoning = ""
+        try:
+            response = self._backend.query(
+                OPENNESS_PROMPT,
+                [(f"Frontier {frontier_id}.", image)],
+            )
+            result = parse_openness_result(response)
+            score = result.score
+            reasoning = result.reasoning
+        except Exception as exc:
+            # One bad/truncated reply must not abort the whole batch (often 40+ frontiers).
+            self.get_logger().error(
+                f"Frontier {frontier_id} rating failed ({exc}); defaulting score=0"
+            )
+            score = 0
+            reasoning = f"rating failed: {exc}"
+        self.get_logger().info(
+            f"Frontier {frontier_id} openness score={score}"
+            + (f" ({reasoning})" if reasoning else "")
         )
-        score = parse_openness_score(response)
-        self.get_logger().info(f"Frontier {frontier_id} openness score={score}")
-        return frontier_id, score
+        return frontier_id, score, reasoning
 
     def execute(self, goal_handle):
         goal = goal_handle.request
@@ -101,6 +115,7 @@ class VlmNode(Node):
         goal_handle.publish_feedback(feedback)
 
         scores_by_id: dict[int, int] = {}
+        reasonings_by_id: dict[int, str] = {}
         max_workers = max(1, min(len(goal.images), 8))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [
@@ -108,8 +123,9 @@ class VlmNode(Node):
                 for fid, image in zip(goal.frontier_ids, goal.images)
             ]
             for future in as_completed(futures):
-                frontier_id, score = future.result()
+                frontier_id, score, reasoning = future.result()
                 scores_by_id[frontier_id] = score
+                reasonings_by_id[frontier_id] = reasoning
 
         feedback.status = 2
         goal_handle.publish_feedback(feedback)
@@ -118,6 +134,7 @@ class VlmNode(Node):
         for fid in goal.frontier_ids:
             result.frontier_ids.append(int(fid))
             result.scores.append(int(scores_by_id[int(fid)]))
+            result.reasonings.append(str(reasonings_by_id.get(int(fid), "")))
         goal_handle.succeed()
         return result
 

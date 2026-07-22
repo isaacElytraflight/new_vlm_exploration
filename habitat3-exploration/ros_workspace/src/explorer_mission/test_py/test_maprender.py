@@ -7,6 +7,12 @@ import pytest
 from nav_msgs.msg import OccupancyGrid
 from std_msgs.msg import Header
 
+from explorer_mission.maprender_node import (
+    NOT_RATED,
+    occupancy_to_bgr,
+    openness_label_text,
+)
+
 
 def _make_grid(width: int = 20, height: int = 20) -> OccupancyGrid:
     msg = OccupancyGrid()
@@ -21,6 +27,15 @@ def _make_grid(width: int = 20, height: int = 20) -> OccupancyGrid:
     data[0, :] = 100
     msg.data = data.flatten().tolist()
     return msg
+
+
+def test_harness_positive():
+    assert 1 + 1 == 2
+
+
+def test_harness_negative():
+    with pytest.raises(AssertionError):
+        assert 1 == 2
 
 
 def test_occupancy_grid_has_obstacle_border_positive():
@@ -38,3 +53,28 @@ def test_mismatched_grid_shape_negative():
     grid.data = [0, 0, 0]  # wrong length
     with pytest.raises(ValueError):
         np.asarray(grid.data, dtype=np.int8).reshape(grid.info.height, grid.info.width)
+
+
+def test_openness_label_0_to_5_positive():
+    for score in range(6):
+        assert openness_label_text(score) == str(score)
+
+
+def test_openness_label_not_rated_negative():
+    assert openness_label_text(NOT_RATED) is None
+
+
+def test_occupancy_to_bgr_is_grayscale_positive():
+    """Grid-only render uses gray/black/white — no chroma overlays."""
+    grid = np.zeros((10, 10), dtype=np.int8)
+    grid[0, :] = 100
+    grid[5, 5] = -1
+    bgr = occupancy_to_bgr(grid)
+    # Every pixel channel-equal (true gray).
+    assert np.all(bgr[:, :, 0] == bgr[:, :, 1])
+    assert np.all(bgr[:, :, 1] == bgr[:, :, 2])
+
+
+def test_occupancy_to_bgr_empty_negative():
+    bgr = occupancy_to_bgr(np.zeros((0, 0), dtype=np.int8))
+    assert bgr.size == 0

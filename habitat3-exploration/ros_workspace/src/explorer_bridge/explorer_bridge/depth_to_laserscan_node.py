@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish /scan from /depth_data with SensorDataQoS (slam_toolbox compatible)."""
+"""Publish /scan from /depth_data (SensorDataQoS)."""
 
 from __future__ import annotations
 
@@ -23,9 +23,10 @@ class DepthToLaserScanNode(Node):
         self.declare_parameter("camera_info_topic", "/depth/camera_info")
         self.declare_parameter("scan_topic", "/scan")
         self.declare_parameter("full_360", False)
-        self.declare_parameter("band_anchor", "center")
+        self.declare_parameter("band_anchor", "upper_third")
         self.declare_parameter("num_bins", 360)
-        self.declare_parameter("free_near_eps", 2.5)
+        self.declare_parameter("sensor_far", 50.0)
+        self.declare_parameter("sat_eps", 0.5)
 
         self._range_min = float(self.get_parameter("range_min").value)
         self._range_max = float(self.get_parameter("range_max").value)
@@ -34,7 +35,8 @@ class DepthToLaserScanNode(Node):
         self._full_360 = bool(self.get_parameter("full_360").value)
         self._band_anchor = str(self.get_parameter("band_anchor").value)
         self._num_bins = int(self.get_parameter("num_bins").value)
-        self._free_near_eps = float(self.get_parameter("free_near_eps").value)
+        self._sensor_far = float(self.get_parameter("sensor_far").value)
+        self._sat_eps = float(self.get_parameter("sat_eps").value)
         scan_topic = str(self.get_parameter("scan_topic").value)
         depth_topic = str(self.get_parameter("depth_topic").value)
         info_topic = str(self.get_parameter("camera_info_topic").value)
@@ -51,7 +53,7 @@ class DepthToLaserScanNode(Node):
         self.get_logger().info(
             f"Publishing {scan_topic} from {depth_topic} "
             f"(frame={self._output_frame}, range=[{self._range_min}, {self._range_max}], "
-            f"360={self._full_360}, band={self._band_anchor})"
+            f"band={self._band_anchor})"
         )
 
     def _info_cb(self, msg: CameraInfo) -> None:
@@ -77,7 +79,8 @@ class DepthToLaserScanNode(Node):
             band_anchor=self._band_anchor,  # type: ignore[arg-type]
             full_360=self._full_360,
             num_bins=self._num_bins,
-            free_near_eps=self._free_near_eps,
+            sensor_far=self._sensor_far,
+            sat_eps=self._sat_eps,
         )
 
         scan = LaserScan()

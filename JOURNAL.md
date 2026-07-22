@@ -6,6 +6,326 @@ Add a new dated section at the top when you work on this repo.
 
 ---
 
+## 2026-07-21 — Day closeout: mapping → Nav2 motion → dashboard (session summary)
+
+Long session landing a working discrete-step exploration loop with VLM-rated
+frontiers, usable maps, and a stable Nav2 bringup. End state: robot plans a
+blue path and **walks** along it (drive-first discrete bridge), grid/nav-plan
+views are split, walls are inflated ~10 cm, and a Current Frontier debug panel
+shows score + reasoning.
+
+### What worked
+
+| Area | Outcome |
+|------|---------|
+| **Depth → scan band** | Phantom walls from floor hits fixed with `band_anchor: upper_third` (camera ~0.1 m). Dropped failed July `free_near_eps` clip. Habitat `depth.far=50`, sat→NaN, mapping `range_max=10`. |
+| **Frontiers after 360°** | Split radii: `frontier_exclusion_radius=1.0` vs `frontier_detection_radius=50.0` (same 5 m for both had wiped the frontier ring). |
+| **VLM truncated JSON** | Score-first prompt, `num_predict=192`, regex `"score": N`, per-frontier default 0 on parse failure (batch no longer aborts). |
+| **TF keepalive** | 30 Hz **TF-only** (no `/odom`) during DiscreteMove — stops future-stamp spam without flooding mapper exact-stamp cache. |
+| **Discrete motion** | Prefer **forward when linear is significant**; turn only when linear≈0. This ended “spin until perfectly aligned” jitter. Yaw Nav2 tolerances alone did **not** fix it. |
+| **Nav2 bringup** | Custom `navigation_sim.launch.py` **omits collision_monitor**; `cmd_vel_smoothed`→`/cmd_vel`. Empty `observation_sources: []` crashed Jazzy; `enabled: False` still died on configure. |
+| **Dashboard** | Grid Map = occupancy only (`grid_img`); Nav Plan = plans + frontiers + scores (`nav_plan_img`); Depth Debug; Current Frontier (VLM) with overlay. |
+| **Map realism** | Publish-time `obstacle_inflation_m=0.10` on `/grid_map` so frontiers + Nav2 share thickened walls. |
+| **Msgs** | `RateFrontierOpenness` / `FrontierOpennessScores` carry `reasonings`. |
+
+### What did *not* work (do not re-try blindly)
+
+- Clipping near `range_max` as “free” to hide far walls — erases real walls.
+- Empty collision_monitor `observation_sources: []` — invalid param crash.
+- Disabling collision sources only — node still aborted lifecycle bringup.
+- Raising `rotate_to_heading_min_angle` / `yaw_goal_tolerance` (±30°→±60°) — **did not** stop path jitter; root cause was cmd_vel angular-first priority.
+- Publishing `/odom` on the TF keepalive timer — filled exact-stamp cache (2048) and deferred all scans.
+- `setup.py` console_scripts alone for `current_frontier_view_node` — ament_cmake needs `install(PROGRAMS)`; missing exe killed tmux on launch.
+
+### Incidental / still noisy
+
+- `known_pose_mapper: No /odom with exact scan stamp` still appears under load (secondary while navigating).
+- Costmap “timestamp earlier than transform cache” for `base_link` still logs; motion works around it for now.
+- VLM openness scores cluster high (see backlog #4).
+
+### Next session backlog (priority)
+
+1. **~1 m goal acceptance circle** — With drive-first discrete steps, the robot sometimes orbits the target instead of finishing. Treat “within ~1 m of goal” as arrived and release to the next frontier/scan.
+2. **DFS child order toggle (project action)** — Button to pick highest-openness-first vs lowest-first when selecting the next child. **Default: highest first** (want to measure that policy).
+3. **Unknown = lethal for planning** — Planner must not path through unknown cells (treat like occupied). Stops “jailbreak” routes that leave the known room and cut through unexplored space behind walls. Likely Nav2 `allow_unknown: false` + costmap/lethal unknown handling; verify frontiers still detect free/unknown boundaries.
+4. **Long-term: VLM openness calibration** — Model is consistently optimistic (mostly 3–4). Need a wider score mix (1–4). Investigate prompt, examples, temperature, or a post-score prior — after motion/planning path is solid.
+
+### Ops reminder
+
+Stop Episode → Run after bridge/Nav2/explore/VLM changes. Reconnect Elytra if `project.yaml` views change. C++ needs in-container `colcon build`; Python under bind mounts is live with symlink-install.
+
+---
+
+## 2026-07-21 — collision_monitor aborts Nav2 bringup again
+
+### Logs
+`Failed to change state for node: collision_monitor. Exception: change_state
+service is not available!` → `Aborting bringup.`
+
+### Cause
+Even with sources `enabled: False`, collision_monitor still dies/hangs during
+configure; lifecycle manager then aborts the whole Nav2 stack.
+
+### Fix
+Custom `navigation_sim.launch.py`: omit collision_monitor; remap
+`cmd_vel_smoothed` → `cmd_vel`. `nav2_exploration.launch.py` uses it instead of
+stock `nav2_bringup/navigation_launch.py`.
+
+### Ops
+Stop → Run.
+
+---
+
+## 2026-07-21 — Path jitter: angular-first discrete bridge
+
+### Symptom
+Yaw Nav2 tolerances (±30°/±60°) did not stop jitter. Robot only stepped
+forward when almost perfectly aligned with the blue path.
+
+### Cause
+`cmd_vel_to_intent` checked **angular before linear**. RPP emits
+`linear>0` + mild `angular` while following; every tick became a 10° turn
+until angular dropped below threshold.
+
+### Fix
+Prefer drive when `|linear| > linear_threshold`; turn only when linear is
+below threshold (true rotate-in-place).
+
+### Ops
+Stop → Run (Python bind-mounted / symlink).
+
+---
+
+## 2026-07-21 — tmux dies after start (missing current_frontier_view_node)
+
+### Symptom
+Episode tmux exits a few seconds after Run.
+
+### Cause
+`current_frontier_view_node` was only in `setup.py` console_scripts.
+`explorer_mission` installs Python nodes via **CMake `install(PROGRAMS)`** —
+launch could not find the executable → `ros2 launch` aborted → trap killed tmux.
+
+### Fix
+Add `install(PROGRAMS ... RENAME current_frontier_view_node)` to CMakeLists.txt.
+Guard test: `test_launch_executables.py`.
+
+### Ops
+Stop → Run (start_sim rebuilds packages).
+
+---
+
+## 2026-07-21 — Dashboard views, yaw slack, wall inflate, VLM frontier panel
+
+### Changes
+1. **Grid Map vs Nav Plan:** `map_renderer/grid_img` (occupancy only) vs
+   `map_renderer/nav_plan_img` (plans + frontiers + scores). `project.yaml` updated.
+2. **Yaw ±30°:** `yaw_goal_tolerance` + `rotate_to_heading_min_angle` = 0.524 rad.
+3. **10 cm wall inflate:** `obstacle_inflation_m=0.10` at mapper publish time
+   (`inflate_occupied`) so frontiers + Nav2 share thickened walls.
+4. **Current Frontier view:** scores carry `reasonings`;
+   `current_frontier_view_node` publishes annotated JPEG on
+   `/exploration/debug/current_frontier_img`.
+
+### Ops
+Rebuild msgs + mission in container, then Stop → Run (reconnect so views JSON
+picks up new panels).
+
+---
+
+## 2026-07-21 — Blue path, robot frozen, "Passing new path" spam
+
+### Symptoms
+Nav2 draws blue path; robot does not move; `controller_server` repeats
+`Passing new path to controller`; costmap TF "earlier than transform cache"
+noise; mapper exact-stamp deferred.
+
+### Cause
+Live `/cmd_vel` was `angular.z=0.1` (RPP aligning). `cmd_vel_to_discrete`
+`angular_threshold=0.15` dropped it → **no DiscreteMove** → no Habitat step.
+Controller keeps re-feeding the same path.
+
+### Fix
+- Default angular threshold `0.15` → `0.05` (accept 0.1 rad/s turns)
+- RPP `rotate_to_heading_min_angle` `0.785` → `0.2` (use full 0.4 rad/s sooner)
+
+### Ops
+Stop Episode → Run. Expect DiscreteMove / motion while path is active.
+
+---
+
+## 2026-07-21 — collision_monitor empty params crash (Nav2 stuck)
+
+### Logs
+- `InvalidParameterValueException: observation_sources: No parameter value set`
+- `collision_monitor` died (exit -6)
+- lifecycle_manager forever: `Waiting for service collision_monitor/get_state...`
+- explore: `navigate_to_pose action server not available` → exit 1
+
+### Cause
+Disabling sources with `observation_sources: []` / `polygons: []` is **invalid** in Nav2 Jazzy — parameter must be set to named entries.
+
+### Fix
+Keep `observation_sources: ["scan"]` + `polygons: ["FootprintApproach"]` with **`enabled: False`** on both. Node stays up; no stop-on-invalid-source.
+
+### Ops
+Stop Episode → Run (params are bind-mounted / relaunched with episode).
+
+---
+
+## 2026-07-21 — Collision-monitor stops + mapper stamp cache flood
+
+### Logs
+- collision_monitor: TF future by ~10 ms → "Robot to stop due to invalid source" → Nav2 stuck timeout
+- known_pose_mapper: exact-stamp miss with cache=2048 (full)
+
+### Cause
+TF keepalive published **/odom** every tick → flooded mapper cache and evicted scan-matched stamps. Collision monitor also aborted on tiny TF lag during discrete moves.
+
+### Fix
+- 30 Hz **TF-only** keepalive (no `/odom`)
+- Disable collision sources via `enabled: False` (not empty lists — see entry above)
+
+### Ops
+Stop → Run.
+
+---
+
+## 2026-07-21 — VLM abort on truncated JSON (45 frontiers)
+
+### What the logs showed
+1. Frontiers OK: `kept=45`.
+2. Costmap TF drops (`timestamp earlier than transform cache`) + mapper exact-stamp deferred — noisy but secondary.
+3. **Hard fail:** Ollama `num_predict=64` truncated JSON mid-`reasoning` before `"score"`. Parser found no int → action aborted → `VLM rating failed with code 6`.
+
+### Fix
+- Prompt: emit `"score"` first; short reasoning.
+- `num_predict` 64 → 192.
+- Parser: regex `"score": N` on truncated JSON.
+- Per-frontier catch → default score 2 (do not abort whole batch).
+
+### Ops
+Stop → Run (reload vlm_node).
+
+---
+
+## 2026-07-21 — TF keepalive + frontier radii split + openness labels
+
+### TF / Nav2 stamp spam
+- Cause: DiscreteMove suppressed all timer publishes → stale `odom→base_link` → future extrapolation.
+- Fix: during motion, publish lightweight `get_pose` TF/odom keepalive (no depth); costmap `transform_tolerance: 1.0`.
+
+### Frontiers empty after 360°
+- Cause: same `frontier_detection_radius=5` used for **exclusion** around root → wiped ~4 m frontier ring.
+- Fix: `frontier_exclusion_radius=1.0` (dedupe only); `frontier_detection_radius=50.0` (keep far frontiers). `radius<=0` now means unlimited keep.
+
+### Nav-plan openness labels
+- Map renderer draws 0–5 above each rated tree node (larger, above the dot).
+
+### Ops
+Stop → Run (rebuild already done with symlink; explore_node needs reload).
+
+---
+
+## 2026-07-21 — Mapping cleanup: upper_third is the fix
+
+### Root cause (confirmed)
+Low Habitat camera (~0.1 m) + **center** scan band → intermittent **floor** hits → phantom linear walls on `/grid_map`.
+
+### Final solution
+`band_anchor: upper_third` (24 px at ~H/3). Documented in `design_doc.md`.
+
+### Cleanup (removed non-solutions)
+- Legacy `free_near_eps` blunt clip path (July distance-band “fix”)
+- `free_near_max_eps` ROS param (horizon eps is internal to `integrate_scan`)
+- Dead helpers (`column_ranges_from_depth`, band slice aliases)
+- Bloated characterization tests for the blunt clip
+
+### Kept
+- `depth.far=50` + sat→NaN (separate far-wall/void hygiene)
+- Depth Debug dashboard view
+- Focused upper_third / floor-phantom regression tests
+
+### Verified
+pytest: scan_from_depth, scan_to_occupancy, long_range_mapping, depth_debug_viz, depth_scan_range.
+
+---
+
+## 2026-07-21 — Scan band → upper third
+
+### Theory
+Phantom ~3 m walls may come from mid-image depth (furniture / clutter) because laserscan used the **center** 24-row band.
+
+### Change
+- New `band_anchor: upper_third` — 24-px band centered at row `H/3` (480 → rows 148–172).
+- Default in launch + node.
+- Projection docs/trig: Habitat Z-depth pinhole; elevation via `pixel_elevation_rad`; 2-D range still `hypot(Z, -x_cam)` using the actual band row.
+
+### Verified
+`test_scan_from_depth` / long-range / `test_depth_scan_range` — upper_third sees high wall, ignores mid 3 m phantom.
+
+### Ops
+Stop → Run (reloads depth_to_laserscan).
+
+---
+
+## 2026-07-21 — Depth Debug dashboard view
+
+### Change
+Added **Depth Debug** panel (`/depth_data` → colorized JPEG) so we can see whether grid hallucinations originate in the depth image.
+
+Legend: magenta=NaN/inf, red=0, dark red=`<range_min`, turbo=`0.1–10 m`, yellow=`>10 m` below sat, white=sat~`sensor_far`, orange=negative.
+
+### Files
+- `sim/scripts/depth_debug_viz.py` + `test_depth_debug_viz.py` (11 passed)
+- `elytra_view_server.py` handles `32FC1`; `start_sim.sh` runs bind-mounted script
+- `project.yaml` view `depth-debug`
+
+### Ops
+Reconnect project in Elytra (rewrites views JSON) → Stop → Run Episode.
+
+---
+
+## 2026-07-21 — Saturation ≠ free: sensor_far classifier
+
+### Problem
+July `free_near_eps=2.5` treated anything within 2.5 m of `range_max` as free. Habitat saturated voids and real ~8 m walls share that band → false free arcs; distance thresholding alone cannot separate them.
+
+### Fix
+1. Habitat `depth.far` **10 → 50 m** so room-scale walls get true depth; only true voids saturate near 50.
+2. `normalize_range`: near `sensor_far` → **NaN** (UNKNOWN, skip ray); past mapping `range_max` but below far → clear to horizon; honest hits kept.
+3. Mapper `free_near_max_eps` default **2.5 → 0.05** (horizon clear only).
+4. Launch: `sensor_far=50`, `sat_eps=0.5`; drop active `free_near_eps` (legacy still available if set ≥0).
+
+### Tests
+`test_long_range_mapping.py` + scan_from_depth + scan_to_occupancy → **53 passed** (prior xfails now green).
+
+### Ops
+**Stop Episode → Run** (engine reload required for `depth.far`).
+
+### What we did *not* do
+Did not keep widening the blunt free band. Mid-range ~3 m linear walls still need live diagnosis if depth itself emits a constant plane.
+
+---
+
+## 2026-07-21 — Long-range mapping test harness (no pipeline fix yet)
+
+### Symptom (live)
+Grid still hallucinates (1) a wide free arc where a wall exists, and (2) an occasional linear occupied wall ~3 m ahead. July `free_near_eps=2.5` clip did not solve this reliably.
+
+### Work
+- Documented depth → `/scan` → `/grid_map` pipeline for debugging.
+- Added controlled synthetic suite: `explorer_bridge/test/long_range_scenes.py` + `test_long_range_mapping.py`.
+- Suite encodes both failure modes, characterizes the clip-band false-free-arc, and leaves **2 strict xfail** targets for a real fix (8 m wall occupied under default eps; saturated open must not claim free-to-horizon).
+
+### Verified
+`pytest src/explorer_bridge/test/test_long_range_mapping.py` → **15 passed, 2 xfailed**.
+
+### Insight (for next fix)
+Habitat saturated open space and a real wall at ~8 m share the same finite depth value. `normalize_range` / `free_near_eps` cannot distinguish them — need a better classifier than a distance band.
+
+---
+
 ## 2026-07-17 — Day summary (mapping + teleop + session hygiene)
 
 Long debugging day on Habitat grid mapping and Elytra control. End state: known-pose occupancy mapper (no slam_toolbox), cleaner scan integration, Stop Episode that actually kills orphans, and fast teleop buttons via unix socket.

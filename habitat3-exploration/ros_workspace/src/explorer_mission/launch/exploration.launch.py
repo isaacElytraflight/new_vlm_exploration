@@ -17,6 +17,7 @@ def generate_launch_description() -> LaunchDescription:
     use_privileged_map = LaunchConfiguration("use_privileged_map")
     navigation_mode = LaunchConfiguration("navigation_mode")
     frontier_detection_radius = LaunchConfiguration("frontier_detection_radius")
+    frontier_exclusion_radius = LaunchConfiguration("frontier_exclusion_radius")
     publish_debug_topics = LaunchConfiguration("publish_debug_topics")
 
     bridge_launch = IncludeLaunchDescription(
@@ -43,7 +44,8 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("publish_hz", default_value="15.0"),
         DeclareLaunchArgument("use_privileged_map", default_value="false"),
         DeclareLaunchArgument("navigation_mode", default_value="nav2"),
-        DeclareLaunchArgument("frontier_detection_radius", default_value="5.0"),
+        DeclareLaunchArgument("frontier_detection_radius", default_value="50.0"),
+        DeclareLaunchArgument("frontier_exclusion_radius", default_value="1.0"),
         DeclareLaunchArgument("publish_debug_topics", default_value="false"),
 
         bridge_launch,
@@ -88,6 +90,7 @@ def generate_launch_description() -> LaunchDescription:
                 "base_frame": base_frame,
                 "navigation_mode": navigation_mode,
                 "frontier_detection_radius": frontier_detection_radius,
+                "frontier_exclusion_radius": frontier_exclusion_radius,
                 "publish_debug_topics": publish_debug_topics,
             }],
             output="screen",
@@ -96,6 +99,12 @@ def generate_launch_description() -> LaunchDescription:
             package="explorer_mission",
             executable="maprender_node",
             name="map_renderer",
+            output="screen",
+        ),
+        Node(
+            package="explorer_mission",
+            executable="current_frontier_view_node",
+            name="current_frontier_view",
             output="screen",
         ),
         Node(

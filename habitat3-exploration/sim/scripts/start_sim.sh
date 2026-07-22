@@ -82,7 +82,12 @@ cd - >/dev/null
 
 pkill -f "elytra_view_server.py" 2>/dev/null || true
 (
-  exec python3 /opt/elytra/elytra_view_server.py
+  # Prefer bind-mounted scripts so depth debug viz edits apply without image rebuild.
+  if [ -f /workspace/scripts/elytra_view_server.py ]; then
+    exec python3 /workspace/scripts/elytra_view_server.py
+  else
+    exec python3 /opt/elytra/elytra_view_server.py
+  fi
 ) &
 VIEW_SERVER_PID=$!
 

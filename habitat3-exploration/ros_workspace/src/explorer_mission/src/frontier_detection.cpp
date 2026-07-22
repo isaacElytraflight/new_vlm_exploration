@@ -106,11 +106,12 @@ std::vector<std::vector<cv::Point>> filterContoursNearRobot(
   const cv::Point2f & robot_pos,
   double radius_m)
 {
-  std::vector<std::vector<cv::Point>> result;
+  // Non-positive radius = unlimited (consider all frontiers on the map).
   if (radius_m <= 0.0) {
-    return result;
+    return contours;
   }
 
+  std::vector<std::vector<cv::Point>> result;
   for (const auto & contour : contours) {
     const cv::Point2f midpoint = frontierMidpointWorld(contour, grid);
     if (euclideanDist(robot_pos, midpoint) <= radius_m) {

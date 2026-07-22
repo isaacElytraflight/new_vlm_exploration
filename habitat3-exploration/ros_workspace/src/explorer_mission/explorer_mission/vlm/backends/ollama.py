@@ -20,7 +20,7 @@ DEFAULT_OLLAMA_URL = "http://host.docker.internal:11434"
 DEFAULT_MODEL = "qwen2.5vl:3b"
 DEFAULT_MAX_EDGE = 512
 DEFAULT_TIMEOUT_S = 30
-DEFAULT_NUM_PREDICT = 64
+DEFAULT_NUM_PREDICT = 192
 
 
 class OllamaBackendError(RuntimeError):

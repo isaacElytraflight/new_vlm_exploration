@@ -5,6 +5,7 @@ uint32[] frontier_ids
 # Result
 uint32[] frontier_ids
 uint8[] scores
+string[] reasonings
 ---
 # Feedback
 uint8 status

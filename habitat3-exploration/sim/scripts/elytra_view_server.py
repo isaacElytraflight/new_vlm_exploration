@@ -3,12 +3,15 @@
 
 Reads view definitions from /tmp/elytra_views.json (written by Elytra on sim connect).
 Serves GET /views/{id}/frame.jpg on port 8090 (default).
+
+Supports rgb8/bgr8 images and 32FC1 depth (debug colormap via depth_debug_viz).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -22,9 +25,28 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage, Image
 
+# Prefer bind-mounted /workspace/scripts so depth_debug_viz edits hot-reload.
+_SCRIPTS = Path("/workspace/scripts")
+if _SCRIPTS.is_dir():
+    sys.path.insert(0, str(_SCRIPTS))
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from depth_debug_viz import (  # noqa: E402
+    DEFAULT_RANGE_MAX,
+    DEFAULT_RANGE_MIN,
+    DEFAULT_SAT_EPS,
+    DEFAULT_SENSOR_FAR,
+    depth_to_debug_bgr,
+)
+
 CONFIG_PATH = os.environ.get("ELYTRA_VIEWS_CONFIG", "/tmp/elytra_views.json")
 PORT = int(os.environ.get("ELYTRA_VIEW_SERVER_PORT", "8090"))
 FILE_POLL_HZ = float(os.environ.get("ELYTRA_VIEW_FILE_POLL_HZ", "10"))
+DEPTH_RANGE_MIN = float(os.environ.get("ELYTRA_DEPTH_RANGE_MIN", str(DEFAULT_RANGE_MIN)))
+DEPTH_RANGE_MAX = float(os.environ.get("ELYTRA_DEPTH_RANGE_MAX", str(DEFAULT_RANGE_MAX)))
+DEPTH_SENSOR_FAR = float(os.environ.get("ELYTRA_DEPTH_SENSOR_FAR", str(DEFAULT_SENSOR_FAR)))
+DEPTH_SAT_EPS = float(os.environ.get("ELYTRA_DEPTH_SAT_EPS", str(DEFAULT_SAT_EPS)))
 
 
 def _load_config() -> list[dict[str, Any]]:
@@ -100,13 +122,27 @@ class ElytraViewRelay(Node):
             return None
         return buf.tobytes()
 
+    def _depth_to_bgr(self, msg: Image) -> np.ndarray:
+        depth = np.frombuffer(msg.data, dtype=np.float32).reshape(msg.height, msg.width)
+        return depth_to_debug_bgr(
+            depth,
+            range_min=DEPTH_RANGE_MIN,
+            range_max=DEPTH_RANGE_MAX,
+            sensor_far=DEPTH_SENSOR_FAR,
+            sat_eps=DEPTH_SAT_EPS,
+            with_legend=True,
+        )
+
     def _on_image(self, view_id: str, msg: Image) -> None:
         try:
-            if msg.encoding == "rgb8":
+            enc = (msg.encoding or "").lower()
+            if enc == "rgb8":
                 arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
                 bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-            elif msg.encoding == "bgr8":
+            elif enc == "bgr8":
                 bgr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
+            elif enc in ("32fc1", "32fc"):
+                bgr = self._depth_to_bgr(msg)
             else:
                 self.get_logger().warn(f"{view_id}: unsupported encoding {msg.encoding}")
                 return

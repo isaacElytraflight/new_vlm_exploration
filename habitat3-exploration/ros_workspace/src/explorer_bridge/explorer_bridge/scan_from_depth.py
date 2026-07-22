@@ -7,21 +7,30 @@ from typing import Literal, Sequence
 
 import numpy as np
 
-BandAnchor = Literal["bottom", "center"]
+BandAnchor = Literal["bottom", "center", "upper_third"]
+
+# Habitat depth.far — keep well above room-scale walls so voids saturate near
+# ``far``, not near the mapping horizon (``clear_range`` / range_max).
+DEFAULT_SENSOR_FAR_M = 50.0
+DEFAULT_SAT_EPS_M = 0.5
 
 
-def row_band_slice(height: int, scan_height: int, *, anchor: BandAnchor = "bottom") -> slice:
-    """Select depth rows for 2-D SLAM (floor band for low-mounted cameras)."""
+def row_band_slice(height: int, scan_height: int, *, anchor: BandAnchor = "upper_third") -> slice:
+    """Select depth rows for 2-D occupancy rays.
+
+    Production default is ``upper_third``: a low camera (~0.1 m) sees the floor
+    in the center/bottom of the image; sampling there paints phantom walls.
+    A band centered near row ``H/3`` looks at wall geometry above the floor.
+    """
     band = max(1, scan_height)
+    half = max(1, band // 2)
     if anchor == "bottom":
         return slice(height - band, height)
-    half = max(1, band // 2)
-    cy = height // 2
-    return slice(cy - half, cy + half)
-
-
-def center_band_row_slice(height: int, scan_height: int) -> slice:
-    return row_band_slice(height, scan_height, anchor="center")
+    if anchor == "upper_third":
+        mid = max(half, min(height - half, height // 3))
+        return slice(mid - half, mid + half)
+    mid = height // 2
+    return slice(mid - half, mid + half)
 
 
 def _pixel_to_base_link_xy(
@@ -34,14 +43,20 @@ def _pixel_to_base_link_xy(
     cx: float,
     cy: float,
 ) -> tuple[float, float] | None:
-    """Project a depth pixel to base_link (x forward, y left) on the ground plane."""
+    """Project a depth pixel to base_link (x forward, y left).
+
+    Habitat depth is camera-frame **Z** (optical-axis depth), not Euclidean ray
+    length. Pinhole::
+
+        P_cam = ((u-cx)/fx * Z, (v-cy)/fy * Z, Z)
+        x_base, y_base = Z, -P_cam.x
+
+    ``row`` must be the real pixel row (upper-third band looks upward).
+    """
     if not math.isfinite(depth) or depth <= 0.0:
         return None
-    # Habitat depth = distance along the optical +Z axis (meters).
     z_c = depth
     x_c = (col - cx) / fx * z_c
-    y_c = (row - cy) / fy * z_c
-    # Optical frame: +Z forward, +X right, +Y down; base_link: +X forward, +Y left.
     x_bl = z_c
     y_bl = -x_c
     if x_bl <= 0.01:
@@ -49,22 +64,33 @@ def _pixel_to_base_link_xy(
     return x_bl, y_bl
 
 
+def pixel_elevation_rad(row: float, *, fy: float, cy: float) -> float:
+    """Elevation above the optical axis (radians, + = look up)."""
+    return math.atan(-(row - cy) / fy)
+
+
 def normalize_range(
     raw: float,
     *,
     range_min: float,
     clear_range: float,
-    free_near_eps: float = 2.5,
+    sensor_far: float = DEFAULT_SENSOR_FAR_M,
+    sat_eps: float = DEFAULT_SAT_EPS_M,
 ) -> float:
-    """Clamp invalid / near-clip / long hits to clear_range (free, not a wall).
+    """Classify a horizontal range for LaserScan publishing.
 
-    Habitat depth often saturates several meters below ``far`` (seen ~8–9.9 m
-    with far=10). Values within free_near_eps of clear_range become clear_range.
+    - finite hit — obstacle range
+    - ``clear_range`` — past mapping horizon but below sensor far (free ray)
+    - NaN — invalid or near ``sensor_far`` saturation (mapper leaves UNKNOWN)
     """
-    if not math.isfinite(raw) or raw < range_min:
+    if not math.isfinite(raw):
+        return float("nan")
+    if raw < range_min:
         return clear_range
-    eps = max(0.0, float(free_near_eps))
-    if raw >= clear_range - eps:
+    far = max(float(sensor_far), float(clear_range))
+    if raw >= far - max(0.0, float(sat_eps)):
+        return float("nan")
+    if raw > clear_range:
         return clear_range
     return raw
 
@@ -79,10 +105,11 @@ def depth_to_laserscan_bins(
     range_min: float,
     clear_range: float,
     scan_height: int = 24,
-    band_anchor: BandAnchor = "bottom",
-    full_360: bool = True,
+    band_anchor: BandAnchor = "upper_third",
+    full_360: bool = False,
     num_bins: int = 360,
-    free_near_eps: float = 2.5,
+    sensor_far: float = DEFAULT_SENSOR_FAR_M,
+    sat_eps: float = DEFAULT_SAT_EPS_M,
 ) -> tuple[list[float], float, float, float]:
     """Build a LaserScan range array in base_link (0 rad = forward, + = left)."""
     if depth.ndim != 2:
@@ -124,8 +151,11 @@ def depth_to_laserscan_bins(
             horiz_range,
             range_min=range_min,
             clear_range=clear_range,
-            free_near_eps=free_near_eps,
+            sensor_far=sensor_far,
+            sat_eps=sat_eps,
         )
+        if not math.isfinite(normalized):
+            continue
         if full_360:
             idx = int(round((bearing - angle_min) / angle_increment)) % num_bins
         else:
@@ -138,38 +168,10 @@ def depth_to_laserscan_bins(
         if cell:
             ranges.append(min(cell))
         else:
-            # No camera coverage for this bearing — leave unknown for SLAM.
-            # Filling clear_range here makes every scan look like a 5–10 m circle
-            # and prevents the map from growing during pure rotation.
+            # No coverage / only saturated — UNKNOWN for the mapper (not free).
             ranges.append(float("nan"))
 
     return ranges, angle_min, angle_max, angle_increment
-
-
-def column_ranges_from_depth(
-    depth: np.ndarray,
-    *,
-    fx: float,
-    cx: float,
-    range_min: float,
-    range_max: float,
-    scan_height: int = 50,
-    **kwargs,
-) -> tuple[list[float], float, float, float]:
-    """Backward-compatible wrapper (uses clear_range = range_max)."""
-    return depth_to_laserscan_bins(
-        depth,
-        fx=fx,
-        fy=fx,
-        cx=cx,
-        cy=depth.shape[0] / 2.0,
-        range_min=range_min,
-        clear_range=range_max,
-        scan_height=scan_height,
-        full_360=kwargs.get("full_360", False),
-        band_anchor=kwargs.get("band_anchor", "center"),
-        free_near_eps=float(kwargs.get("free_near_eps", 2.5)),
-    )
 
 
 def finite_fraction(ranges: Sequence[float]) -> float:

@@ -10,7 +10,8 @@ from explorer_msgs.action import DiscreteMove
 
 @dataclass(frozen=True)
 class CmdVelThresholds:
-    angular_threshold: float = 0.15
+    # Pure rotate-in-place (linear≈0): accept small angular so Nav2 can align.
+    angular_threshold: float = 0.05
     linear_threshold: float = 0.03
     turn_step_deg: float = 10.0
     move_step_m: float = 0.25
@@ -27,16 +28,22 @@ def cmd_vel_to_intent(
     angular_z: float,
     thresholds: CmdVelThresholds | None = None,
 ) -> Optional[DiscreteMoveIntent]:
-    """Return a single discrete step intent, or None if below thresholds."""
+    """Return a single discrete step intent, or None if below thresholds.
+
+    Prefer **drive** when linear is significant. RPP path following always mixes
+    a little angular with forward velocity; angular-first priority caused endless
+    10° turns until nearly perfectly aligned (Habitat jitter).
+    Rotate-in-place only when linear is below threshold.
+    """
     t = thresholds or CmdVelThresholds()
-    if abs(angular_z) > t.angular_threshold:
-        direction = (
-            DiscreteMove.Goal.TURN_LEFT if angular_z > 0 else DiscreteMove.Goal.TURN_RIGHT
-        )
-        return DiscreteMoveIntent(direction=direction, steps=1)
     if abs(linear_x) > t.linear_threshold:
         direction = (
             DiscreteMove.Goal.FORWARD if linear_x > 0 else DiscreteMove.Goal.BACKWARD
+        )
+        return DiscreteMoveIntent(direction=direction, steps=1)
+    if abs(angular_z) > t.angular_threshold:
+        direction = (
+            DiscreteMove.Goal.TURN_LEFT if angular_z > 0 else DiscreteMove.Goal.TURN_RIGHT
         )
         return DiscreteMoveIntent(direction=direction, steps=1)
     return None

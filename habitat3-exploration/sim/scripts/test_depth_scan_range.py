@@ -1,4 +1,4 @@
-"""Regression: horizon (center) band for low-mounted depth camera SLAM."""
+"""Regression: depth row-band selection for low-mounted Habitat camera."""
 
 from __future__ import annotations
 
@@ -8,11 +8,14 @@ import pytest
 
 def _row_band_slice(height: int, scan_height: int, *, anchor: str) -> slice:
     band = max(1, scan_height)
+    half = max(1, band // 2)
     if anchor == "bottom":
         return slice(height - band, height)
-    half = max(1, band // 2)
-    cy = height // 2
-    return slice(cy - half, cy + half)
+    if anchor == "upper_third":
+        mid = max(half, min(height - half, height // 3))
+        return slice(mid - half, mid + half)
+    mid = height // 2
+    return slice(mid - half, mid + half)
 
 
 def band_valid_fraction(
@@ -40,6 +43,17 @@ def test_center_band_nonempty_at_5m_positive():
     rng = np.random.default_rng(0)
     depth = rng.uniform(1.5, 4.5, size=(480, 640)).astype(np.float32)
     frac = band_valid_fraction(depth, clear_range=5.0, anchor="center")
+    assert frac > 0.25
+
+
+def test_upper_third_band_placement_positive():
+    assert _row_band_slice(480, 24, anchor="upper_third") == slice(148, 172)
+
+
+def test_upper_third_band_nonempty_at_5m_positive():
+    rng = np.random.default_rng(0)
+    depth = rng.uniform(1.5, 4.5, size=(480, 640)).astype(np.float32)
+    frac = band_valid_fraction(depth, clear_range=5.0, anchor="upper_third")
     assert frac > 0.25
 
 

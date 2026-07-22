@@ -135,6 +135,14 @@ class ExplorerBridgeNode(Node):
             odom_topic = self.get_parameter("odom_topic").get_parameter_value().string_value
             self._odom_pub = self.create_publisher(Odometry, odom_topic, 10)
             self._tf_broadcaster = TransformBroadcaster(self)
+            # Always refresh odom→base_link TF so Nav2 never looks microseconds
+            # into the future of a stale transform. TF-only (no /odom) so the
+            # mapper's exact-stamp cache is not flooded.
+            self._tf_timer = self.create_timer(
+                1.0 / 30.0,
+                self._on_tf_keepalive_timer,
+                callback_group=self._cb_group,
+            )
 
         self._driver_ready = True
         self.get_logger().info(
@@ -154,12 +162,28 @@ class ExplorerBridgeNode(Node):
         return CancelResponse.ACCEPT
 
     def _publish_sensor_data(self) -> None:
-        # During DiscreteMove, only the post-step publish should emit sensors.
-        # Timer duplicates with a new stamp would flood /scan and amplify smear.
+        # During DiscreteMove, only post-step publishes depth/RGB. TF is kept
+        # fresh by ``_on_tf_keepalive_timer`` (TF-only, no /odom).
         if self._motion_active > 0:
             return
         with self._io_lock:
             self._publish_sensor_data_locked()
+
+    def _on_tf_keepalive_timer(self) -> None:
+        with self._io_lock:
+            self._publish_tf_keepalive_locked()
+
+    def _publish_tf_keepalive_locked(self) -> None:
+        """Publish odom→base_link TF only (not /odom) for Nav2 transform lookups."""
+        if not self._driver_ready or not hasattr(self, "_tf_broadcaster"):
+            return
+        try:
+            pose = self._driver.get_pose()
+        except Exception as exc:
+            self.get_logger().warn(f"get_pose keepalive failed: {exc}", throttle_duration_sec=2.0)
+            return
+        stamp = self.get_clock().now().to_msg()
+        self._publish_tf_from_pose(pose, stamp)
 
     def _publish_sensor_data_locked(self) -> None:
         if not self._driver_ready:
@@ -239,6 +263,17 @@ class ExplorerBridgeNode(Node):
             odom_yaw += 2.0 * math.pi
         return odom_x, odom_y, odom_yaw
 
+    def _publish_tf_from_pose(self, pose: PoseData, stamp) -> None:
+        odom_x, odom_y, odom_yaw = self._habitat_pose_to_odom(pose)
+        tf_msg = TransformStamped()
+        tf_msg.header.stamp = stamp
+        tf_msg.header.frame_id = self._odom_frame
+        tf_msg.child_frame_id = self._base_frame
+        tf_msg.transform.translation.x = odom_x
+        tf_msg.transform.translation.y = odom_y
+        tf_msg.transform.rotation = self._yaw_to_quaternion(odom_yaw)
+        self._tf_broadcaster.sendTransform(tf_msg)
+
     def _publish_odom_tf_from_pose(self, pose: PoseData, stamp) -> None:
         odom_x, odom_y, odom_yaw = self._habitat_pose_to_odom(pose)
         odom = Odometry()
@@ -249,15 +284,7 @@ class ExplorerBridgeNode(Node):
         odom.pose.pose.position.y = odom_y
         odom.pose.pose.orientation = self._yaw_to_quaternion(odom_yaw)
         self._odom_pub.publish(odom)
-
-        tf_msg = TransformStamped()
-        tf_msg.header.stamp = stamp
-        tf_msg.header.frame_id = self._odom_frame
-        tf_msg.child_frame_id = self._base_frame
-        tf_msg.transform.translation.x = odom_x
-        tf_msg.transform.translation.y = odom_y
-        tf_msg.transform.rotation = odom.pose.pose.orientation
-        self._tf_broadcaster.sendTransform(tf_msg)
+        self._publish_tf_from_pose(pose, stamp)
 
     def _teleop_step_name(self, name: str) -> tuple[bool, str]:
         action = TELEOP_NAME_TO_ACTION.get(str(name).strip().lower())

@@ -22,6 +22,7 @@ setup(
         "console_scripts": [
             "vlm_node = explorer_mission.vlm.vlm_node:main",
             "maprender_node = explorer_mission.maprender_node:main",
+            "current_frontier_view_node = explorer_mission.current_frontier_view_node:main",
         ],
     },
 )

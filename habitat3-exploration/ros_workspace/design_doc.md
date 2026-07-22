@@ -88,10 +88,33 @@ Default launch (`nav2_exploration.launch.py`) mirrors the real robot (T265 pose 
 
 1. Privileged pose: Habitat GT (sim) or T265 (real) → `/odom` + `odom`→`base_link`; `map`→`odom` identity
 2. `/depth_data` → `depth_to_laserscan` → `/scan`
-3. `/scan` + map→base TF → `known_pose_mapper` → `/grid_map` (no slam_toolbox)
+3. `/scan` + matching `/odom` stamp → `known_pose_mapper` → `/grid_map` (no slam_toolbox)
 4. `explore_node` reads `/grid_map` on demand at tree leaf nodes
 
 Debug-only: `use_privileged_map:=true` restores `habitat_map_node` (Habitat pathfinder / `get_map` IPC).
+Dashboard: **Depth Debug** view colorizes `/depth_data` (NaN / zero / sat / valid).
+
+#### Depth → scan (what actually fixed phantom walls)
+
+The Habitat depth camera sits ~0.1 m above the floor. A **center** (or bottom)
+row band intermittently samples the floor and paints linear occupied “walls”
+a few meters ahead.
+
+**Solution:** `band_anchor: upper_third` — a 24-row band centered at row
+`H/3` (480 → rows 148–172), looking slightly upward at wall geometry. Keep
+`scan_height: 24`, FOV-only bins (`full_360: false`), uncovered / saturated
+bearings as NaN.
+
+Supporting (not the phantom-wall fix, but keep):
+
+| Setting | Value | Why |
+|---------|-------|-----|
+| Habitat `depth.far` | 50 m | Room walls get true depth; voids saturate near far |
+| `range_max` | 10 m | Mapping horizon |
+| Near-`sensor_far` depth | NaN | Skip ray → UNKNOWN (do not invent free arcs or fake far walls) |
+
+**What did not fix phantoms:** clipping everything within ~2.5 m of `range_max`
+to “free” (`free_near_eps`). That hid real far walls and did not stop floor hits.
 
 ### Navigation
 

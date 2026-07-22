@@ -52,7 +52,8 @@ public:
     map_frame_ = declare_parameter<std::string>("map_frame", "map");
     base_frame_ = declare_parameter<std::string>("base_frame", "base_link");
     navigation_mode_ = declare_parameter<std::string>("navigation_mode", "nav2");
-    frontier_detection_radius_ = declare_parameter<double>("frontier_detection_radius", 5.0);
+    frontier_detection_radius_ = declare_parameter<double>("frontier_detection_radius", 50.0);
+    frontier_exclusion_radius_ = declare_parameter<double>("frontier_exclusion_radius", 1.0);
     min_contour_pixels_ = declare_parameter<int>("min_contour_pixels", 15);
     vlm_scores_timeout_s_ = declare_parameter<double>("vlm_scores_timeout_s", 120.0);
     publish_debug_topics_ = declare_parameter<bool>("publish_debug_topics", false);
@@ -330,11 +331,15 @@ private:
 
     const auto exclusion_centers = tree_.allNodePositions();
     const cv::Mat mask = explorer_mission::buildExclusionMask(
-      grid, exclusion_centers, frontier_detection_radius_);
+      grid, exclusion_centers, frontier_exclusion_radius_);
     auto contours = explorer_mission::findFrontierContoursMasked(
       grid, mask, min_contour_pixels_);
     contours = explorer_mission::filterContoursNearRobot(
       contours, grid, current_pos_, frontier_detection_radius_);
+    RCLCPP_INFO(
+      get_logger(),
+      "Frontier detect: kept=%zu keep_r=%.1fm excl_r=%.1fm",
+      contours.size(), frontier_detection_radius_, frontier_exclusion_radius_);
 
     std::vector<uint32_t> new_child_ids;
     for (const auto & contour : contours) {
@@ -645,7 +650,8 @@ private:
   std::string map_frame_;
   std::string base_frame_;
   std::string navigation_mode_{"nav2"};
-  double frontier_detection_radius_{5.0};
+  double frontier_detection_radius_{50.0};
+  double frontier_exclusion_radius_{1.0};
   int min_contour_pixels_{15};
   double vlm_scores_timeout_s_{120.0};
   bool publish_debug_topics_{false};

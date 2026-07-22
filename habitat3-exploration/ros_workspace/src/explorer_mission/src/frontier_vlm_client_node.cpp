@@ -105,6 +105,7 @@ public:
         msg.header = fv->header;
         msg.frontier_ids = result.result->frontier_ids;
         msg.scores = result.result->scores;
+        msg.reasonings = result.result->reasonings;
         scores_pub_->publish(msg);
         RCLCPP_INFO(
           get_logger(), "Published openness scores for %zu frontiers",
