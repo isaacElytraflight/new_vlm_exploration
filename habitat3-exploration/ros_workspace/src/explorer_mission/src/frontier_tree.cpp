@@ -183,25 +183,50 @@ std::optional<uint32_t> FrontierTree::selectBestAmong(
   return candidates[dist(use_rng)];
 }
 
-std::optional<uint32_t> FrontierTree::findNearestNode(const cv::Point2f & position) const
+std::optional<uint32_t> FrontierTree::findNearestNode(
+  const cv::Point2f & position,
+  const std::vector<uint32_t> * candidate_ids) const
 {
-  if (nodes_.empty()) {
-    return std::nullopt;
-  }
-  uint32_t best_id = nodes_.front().id;
-  double best_dist = std::hypot(
-    position.x - nodes_.front().position.x,
-    position.y - nodes_.front().position.y);
-  for (const auto & node : nodes_) {
+  const TreeNode * best = nullptr;
+  double best_dist = 0.0;
+
+  auto consider = [&](const TreeNode & node) {
     const double d = std::hypot(
       position.x - node.position.x,
       position.y - node.position.y);
-    if (d < best_dist) {
+    if (!best || d < best_dist) {
+      best = &node;
       best_dist = d;
-      best_id = node.id;
+    }
+  };
+
+  if (candidate_ids) {
+    for (uint32_t id : *candidate_ids) {
+      const TreeNode * node = find(id);
+      if (node) {
+        consider(*node);
+      }
+    }
+  } else {
+    for (const auto & node : nodes_) {
+      consider(node);
     }
   }
-  return best_id;
+
+  if (!best) {
+    return std::nullopt;
+  }
+  return best->id;
+}
+
+std::vector<uint32_t> FrontierTree::allNodeIds() const
+{
+  std::vector<uint32_t> ids;
+  ids.reserve(nodes_.size());
+  for (const auto & node : nodes_) {
+    ids.push_back(node.id);
+  }
+  return ids;
 }
 
 std::vector<cv::Point2f> FrontierTree::allNodePositions() const

@@ -21,7 +21,8 @@ services:
       VLM_OLLAMA_URL: ${VLM_OLLAMA_URL:-http://host.docker.internal:11434}
       VLM_LOCAL_MODEL: ${VLM_LOCAL_MODEL:-qwen2.5vl:3b}
       VLM_LOCAL_MAX_EDGE: ${VLM_LOCAL_MAX_EDGE:-512}
-      VLM_LOCAL_TIMEOUT_S: ${VLM_LOCAL_TIMEOUT_S:-30}
+      VLM_LOCAL_TIMEOUT_S: ${VLM_LOCAL_TIMEOUT_S:-90}
+      VLM_MAX_WORKERS: ${VLM_MAX_WORKERS:-2}
       # --- WSL2 GPU rendering path -------------------------------------------
       # Docker Desktop's WSL2 VM has no native NVIDIA EGL stack; OpenGL reaches
       # the GPU through Mesa's d3d12 driver -> libdxcore -> /dev/dxg -> host

@@ -124,6 +124,31 @@ TEST(FrontierTree, FindNearestNode_positive)
   EXPECT_EQ(*nearest, 2u);
 }
 
+TEST(FrontierTree, FindNearestNode_firstBatchParentsToRoot_positive)
+{
+  explorer_mission::FrontierTree tree;
+  tree.createRoot(cv::Point2f(0.0f, 0.0f));
+  const std::vector<uint32_t> previous_batch = tree.allNodeIds();
+  ASSERT_EQ(previous_batch.size(), 1u);
+  ASSERT_EQ(previous_batch.front(), 0u);
+  const auto nearest = tree.findNearestNode(cv::Point2f(8.0f, 3.0f), &previous_batch);
+  ASSERT_TRUE(nearest.has_value());
+  EXPECT_EQ(*nearest, 0u);
+}
+
+TEST(FrontierTree, FindNearestNode_ignoresSameBatchSiblings_negative)
+{
+  explorer_mission::FrontierTree tree;
+  tree.createRoot(cv::Point2f(0.0f, 0.0f));
+  // Simulate a closer node that would be a same-batch sibling — exclude it from pool.
+  tree.addChild(0, cv::Point2f(5.0f, 0.0f), 2, false);
+  const std::vector<uint32_t> previous_batch = {0u};
+  const auto nearest = tree.findNearestNode(cv::Point2f(5.1f, 0.0f), &previous_batch);
+  ASSERT_TRUE(nearest.has_value());
+  EXPECT_EQ(*nearest, 0u);
+  EXPECT_NE(*nearest, 1u);
+}
+
 TEST(FrontierTree, SelectBestAmong_positive)
 {
   explorer_mission::FrontierTree tree;

@@ -6,6 +6,85 @@ Add a new dated section at the top when you work on this repo.
 
 ---
 
+## 2026-07-22 — Day closeout: next-session backlog
+
+Good stopping point after VLM queue/timeout soft-fail fixes. Container rebuilt with
+`VLM_LOCAL_TIMEOUT_S=90`, `VLM_MAX_WORKERS=2`.
+
+### Verify first (regression)
+
+1. **VLM mass-timeout fix** — Confirm no `dropping batch`, fewer Ollama read timeouts, and failures soft-fail to score **1** (not permanent kill via score 0). If still timing out → try `VLM_MAX_WORKERS=1`.
+
+### Features to implement
+
+2. **Coverage vs distance dashboard view** — Extra sim-dashboard panel: realtime graph of **meters traveled** vs **grid-map free-area coverage / Habitat ground-truth floor area** for the active scene.
+3. **Scene selector dropdown** — Project Actions control to pick different Habitat environments (reload/restart episode on change).
+
+### Research / quality (from journal, still open)
+
+4. **VLM openness calibration** — Scores still cluster ~3–4; want a usable 1–4 mix (prompt / examples / temperature / prior).
+5. **Stronger mapping (point cloud)** — Laser/depth band walls still weak; consider depth **point-cloud** mapping instead of (or in addition to) thin laser band.
+
+### Noise / polish (secondary)
+
+6. `known_pose_mapper` exact-stamp cache deferrals under load.
+7. Costmap TF “timestamp earlier than transform cache” (`base_link`).
+8. Birdseye / chase-camera orientation check per scene.
+9. After durable C++ fixes: rebuild `habitat3-exploration:latest` so **Shutdown** (`compose down`) does not lose `install/` (see note below).
+10. Push outstanding `elytra-bridge` commits when ready (nested repo).
+
+### Image rebuild note (backlog #9)
+
+`sim/scripts/` and many Python packages are **bind-mounted** live into the container.
+Compiled C++ under `ros_workspace/install/` is **inside the container filesystem**, baked into the Docker image when you build it.
+
+- **Stop → Run Episode** / in-container `colcon build`: fine for the current container.
+- **Shutdown** / `docker compose down` + next Connect: Docker creates a **fresh** container from `habitat3-exploration:latest`. That image may still have an **old** `install/` unless you ran `docker compose build` (or equivalent) after the C++ change.
+
+So #9 is optional housekeeping: after a C++ fix you care about surviving Shutdown, rebuild the image once. Day-to-day iteration can keep using in-container `colcon build`.
+
+### Closed this closeout (do not re-queue)
+
+- **Depth / free-space classifier / floor in laser** — Solved by no longer picking up the floor in the laser scan (`band_anchor: upper_third` / related depth-band work).
+- **Early exploration stop with unknown left** — No longer an issue (blacklist / `raw_frontiers=0` premature stop).
+- Teleop `docker exec` latency — dropped from backlog (not a priority).
+
+### Explicitly done (do not re-queue)
+
+~1 m goal accept · DFS highest/lowest toggle · unknown=lethal · same-batch dedupe · nearest-parent (prev batch) · green tree edges · early VLM nav · VLM batch queue · Ollama worker/timeout soft-fail · 360° spin hysteresis · drive-first discrete bridge.
+
+---
+
+## 2026-07-22 — Persistent VLM mass-failures (timeouts → dead frontiers)
+
+### Symptom
+Logs filled with:
+- `VLM rating already in flight; dropping batch`
+- `Ollama ... Read timed out (read timeout=30.0)` then `defaulting score=0`
+- Many frontiers scored 0; exploration collapses. Costmap TF / known_pose_mapper noise secondary.
+
+### Root cause (chain)
+1. Early-nav + new detect published another FrontierViews while the prior VLM goal was still running → **client dropped** the batch.
+2. `vlm_node` ran up to **8 concurrent** Ollama VL requests; laptop Ollama couldn't keep up → mass 30s timeouts.
+3. Timeout/failure mapped to **score=0**, and `setOpennessScore(..., 0)` sets `fully_explored=true` → frontiers **permanently killed**.
+
+### Fix
+| Change | File |
+|--------|------|
+| Queue batches instead of drop | `frontier_vlm_client_node.cpp` |
+| Default `VLM_MAX_WORKERS=2`, timeout 90s | `vlm_node.py`, `ollama.py`, compose / `.env.example` |
+| Rating failure → soft-fail **score=1** (not 0) | `vlm_node.py` |
+| Explore wait timeout soft-fails unrated to 1 | `explore_node.cpp` |
+| Streamed scores apply immediately in `vlmScoresCb` | `explore_node.cpp` |
+
+### Ops
+Rebuild `explorer_mission` in container; Stop → Run episode. If `sim/.env` still has `VLM_LOCAL_TIMEOUT_S=30`, bump to 90 or remove the override. Optional: `VLM_MAX_WORKERS=1` if timeouts persist.
+
+### Not the main failure
+TF "earlier than transform cache" and `known_pose_mapper` exact-stamp deferrals are noisy but not what was zeroing frontiers.
+
+---
+
 ## 2026-07-22 — Session: goal accept, DFS order, unknown lethal, motion stuck
 
 ### Landed
@@ -41,7 +120,8 @@ Add a new dated section at the top when you work on this repo.
 3. **Same-batch frontier dedupe** (~1 m) via `dedupeContoursByMidpoint`.
 4. Later: laser scan / walls weak — consider depth point-cloud mapping.
 5. Nav Plan view: thin **green** parent→child tree edges.
-6. Toggle: attach new frontier to **nearest tree node** (default on) + batch select.
+6. Toggle: attach new frontier to **nearest node from a previous batch** (default on).
+   First detect round → all children of root (only prior node).
 7. **VLM partial scores**: `vlm_node` streams each rating; explore early-nav when score ≥ 3.
 
 ### Ops

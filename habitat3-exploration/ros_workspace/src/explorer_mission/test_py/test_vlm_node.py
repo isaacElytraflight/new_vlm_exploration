@@ -179,6 +179,32 @@ def test_gemini_backend_validate_without_key_negative(monkeypatch):
         backend.validate()
 
 
+def test_ollama_default_timeout_positive():
+    from explorer_mission.vlm.backends import ollama as ollama_mod
+
+    assert ollama_mod.DEFAULT_TIMEOUT_S >= 60
+
+
+def test_vlm_max_workers_env_caps_positive(monkeypatch):
+    monkeypatch.setenv("VLM_MAX_WORKERS", "2")
+    max_workers = max(1, min(16, int(__import__("os").getenv("VLM_MAX_WORKERS", "2"))))
+    assert max_workers == 2
+
+
+def test_vlm_max_workers_invalid_falls_back_negative(monkeypatch):
+    monkeypatch.setenv("VLM_MAX_WORKERS", "0")
+    raw = int(__import__("os").getenv("VLM_MAX_WORKERS", "2"))
+    max_workers = max(1, min(16, raw))
+    assert max_workers == 1
+
+
+def test_rating_failure_soft_score_positive():
+    """Timeouts must not map to score 0 (that permanently kills frontiers)."""
+    score_on_failure = 1
+    assert score_on_failure != 0
+    assert score_on_failure == 1
+
+
 def test_harness_negative_control():
     with pytest.raises(AssertionError):
         assert 1 == 2

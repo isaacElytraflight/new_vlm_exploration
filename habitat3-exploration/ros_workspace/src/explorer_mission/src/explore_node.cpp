@@ -57,7 +57,7 @@ public:
     frontier_detection_radius_ = declare_parameter<double>("frontier_detection_radius", 50.0);
     frontier_exclusion_radius_ = declare_parameter<double>("frontier_exclusion_radius", 1.0);
     min_contour_pixels_ = declare_parameter<int>("min_contour_pixels", 15);
-    vlm_scores_timeout_s_ = declare_parameter<double>("vlm_scores_timeout_s", 120.0);
+    vlm_scores_timeout_s_ = declare_parameter<double>("vlm_scores_timeout_s", 300.0);
     publish_debug_topics_ = declare_parameter<bool>("publish_debug_topics", false);
     dfs_prefer_highest_openness_ = declare_parameter<bool>("dfs_prefer_highest_openness", true);
     goal_accept_radius_m_ = declare_parameter<double>("goal_accept_radius_m", 1.0);
@@ -332,7 +332,10 @@ private:
       if (i < msg->reasonings.size()) {
         accumulated_reasonings_[id] = msg->reasonings[i];
       }
+      // Apply as scores stream in (early-nav + late completions after leave wait).
+      tree_.setOpennessScore(id, msg->scores[i]);
     }
+    publishTree();
   }
 
   void publishTree()
@@ -407,12 +410,14 @@ private:
       frontier_detection_radius_, frontier_exclusion_radius_);
 
     last_new_child_ids_.clear();
+    // Parent pool = nodes from previous batches only (not siblings added this round).
+    const std::vector<uint32_t> parent_pool = tree_.allNodeIds();
     std::vector<uint32_t> new_child_ids;
     for (const auto & contour : contours) {
       const cv::Point2f midpoint = explorer_mission::frontierMidpointWorld(contour, grid);
       uint32_t parent_id = tree_.currentNodeId();
       if (parent_to_nearest_node_) {
-        const auto nearest = tree_.findNearestNode(midpoint);
+        const auto nearest = tree_.findNearestNode(midpoint, &parent_pool);
         if (nearest.has_value()) {
           parent_id = *nearest;
         }
@@ -456,9 +461,18 @@ private:
       "awaiting_vlm", tree_.currentNodeId(), 0, false,
       "rating " + std::to_string(views.frontier_ids.size()) + " frontiers");
     if (!waitForVlmScores(views.frontier_ids)) {
-      RCLCPP_WARN(get_logger(), "VLM scores timeout; marking pending children blocked.");
+      // Soft-fail unrated children to score 1 (not 0). Score 0 marks
+      // fully_explored and permanently drops the frontier — that was turning
+      // Ollama timeouts into a dead tree.
+      RCLCPP_WARN(
+        get_logger(),
+        "VLM scores timeout; soft-failing still-unrated children to score=1");
+      applyLatestScores();
       for (uint32_t id : views.frontier_ids) {
-        tree_.setOpennessScore(id, 0);
+        const auto * node = tree_.find(id);
+        if (node && node->openness_score == explorer_mission::kOpennessNotRated) {
+          tree_.setOpennessScore(id, 1);
+        }
       }
       publishTree();
       return true;

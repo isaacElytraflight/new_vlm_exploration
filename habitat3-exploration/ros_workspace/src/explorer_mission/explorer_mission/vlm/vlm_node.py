@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
 
 import rclpy
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
@@ -92,11 +93,12 @@ class VlmNode(Node):
             score = result.score
             reasoning = result.reasoning
         except Exception as exc:
-            # One bad/truncated reply must not abort the whole batch (often 40+ frontiers).
+            # Do NOT use score 0 — that marks the frontier fully_explored and
+            # permanently drops it. Soft-fail to 1 so DFS can still try it.
             self.get_logger().error(
-                f"Frontier {frontier_id} rating failed ({exc}); defaulting score=0"
+                f"Frontier {frontier_id} rating failed ({exc}); soft-fail score=1"
             )
-            score = 0
+            score = 1
             reasoning = f"rating failed: {exc}"
         self.get_logger().info(
             f"Frontier {frontier_id} openness score={score}"
@@ -120,7 +122,12 @@ class VlmNode(Node):
 
         scores_by_id: dict[int, int] = {}
         reasonings_by_id: dict[int, str] = {}
-        max_workers = max(1, min(len(goal.images), 8))
+        # Ollama on a laptop cannot sustain 8 concurrent VL requests — that caused
+        # mass Read timed out → fake score 0 → frontiers permanently dropped.
+        max_workers = max(
+            1,
+            min(len(goal.images), int(os.getenv("VLM_MAX_WORKERS", "2"))),
+        )
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [
                 pool.submit(self._rate_one, int(fid), image)

@@ -47,7 +47,10 @@ public:
     const std::vector<uint32_t> & candidate_ids,
     std::mt19937 * rng = nullptr,
     bool prefer_highest = true) const;
-  std::optional<uint32_t> findNearestNode(const cv::Point2f & position) const;
+  std::optional<uint32_t> findNearestNode(
+    const cv::Point2f & position,
+    const std::vector<uint32_t> * candidate_ids = nullptr) const;
+  std::vector<uint32_t> allNodeIds() const;
   std::vector<cv::Point2f> allNodePositions() const;
   TreeNode * find(uint32_t id);
   const TreeNode * find(uint32_t id) const;
