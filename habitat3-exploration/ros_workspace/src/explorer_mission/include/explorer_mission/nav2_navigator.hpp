@@ -26,13 +26,15 @@ public:
     double total_timeout_s = 120.0,
     double stuck_timeout_s = 60.0,
     double stuck_distance_m = 0.1,
-    const std::function<bool()> & tick = {});
+    const std::function<bool()> & tick = {},
+    double goal_accept_radius_m = 1.0);
 
   void cancel();
 
   void noteProgress(double x, double y, double stuck_distance_m, double stuck_timeout_s);
   bool isStuck(double stuck_timeout_s) const;
   void resetProgress();
+  bool withinGoalAcceptRadius(double goal_x, double goal_y, double radius_m) const;
 
   std::string lastError() const {return last_error_;}
 
@@ -44,6 +46,9 @@ private:
   bool have_progress_anchor_{false};
   double progress_x_{0.0};
   double progress_y_{0.0};
+  double current_x_{0.0};
+  double current_y_{0.0};
+  bool have_current_pose_{false};
   rclcpp::Time last_progress_time_;
 };
 

@@ -27,7 +27,10 @@ controller_server:
     general_goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.15
+      # Must stay BELOW FollowPath.min_lookahead_dist (0.3). RPP reuses this as
+      # goal_dist_tol_ for rotate-to-goal-heading; 1.0m made carrot always "near
+      # goal" so the robot never drove. ~1 m acceptance lives in Nav2Navigator.
+      xy_goal_tolerance: 0.25
       # ±60° — coarse yaw OK; avoids discrete-turn jitter on Habitat steps.
       yaw_goal_tolerance: 1.047
     FollowPath:
@@ -41,8 +44,9 @@ controller_server:
       max_lookahead_dist: 0.9
       use_velocity_scaled_lookahead_dist: true
       rotate_to_heading_angular_vel: 0.4
-      # Only rotate-in-place when heading error exceeds ±60°.
-      rotate_to_heading_min_angle: 1.047
+      # ~23°: start driving sooner. ±60° kept RPP in pure-rotate; discrete 10°
+      # left/right then twitched around the heading and never made XY progress.
+      rotate_to_heading_min_angle: 0.4
       transform_tolerance: 1.0
 
 planner_server:
@@ -54,7 +58,8 @@ planner_server:
       plugin: "nav2_navfn_planner::NavfnPlanner"
       tolerance: 0.5
       use_astar: false
-      allow_unknown: true
+      # Unknown = lethal: no jailbreak paths through unexplored space behind walls.
+      allow_unknown: false
 
 smoother_server:
   ros__parameters:

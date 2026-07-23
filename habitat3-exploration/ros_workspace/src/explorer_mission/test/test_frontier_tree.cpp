@@ -9,7 +9,13 @@ TEST(FrontierTreeHarness, RunnerExecutesAssertions)
   EXPECT_EQ(2 + 2, 4);
 }
 
-TEST(FrontierTree, SelectLowestOpennessChild)
+TEST(FrontierTreeHarness, IntentionalFailureIsDetectable_NegativeControl)
+{
+  const bool negative_control = (1 == 2);
+  EXPECT_TRUE(negative_control == false);
+}
+
+TEST(FrontierTree, SelectHighestOpennessChild_DefaultPositive)
 {
   explorer_mission::FrontierTree tree;
   tree.createRoot(cv::Point2f(0.0f, 0.0f));
@@ -21,7 +27,46 @@ TEST(FrontierTree, SelectLowestOpennessChild)
   ASSERT_TRUE(chosen.has_value());
   const auto * node = tree.find(*chosen);
   ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node->openness_score, 3);
+}
+
+TEST(FrontierTree, SelectLowestOpennessChild_WhenPreferHighestFalse_Positive)
+{
+  explorer_mission::FrontierTree tree;
+  tree.createRoot(cv::Point2f(0.0f, 0.0f));
+  tree.addChild(0, cv::Point2f(1.0f, 0.0f), 3, false);
+  tree.addChild(0, cv::Point2f(2.0f, 0.0f), 1, false);
+  tree.addChild(0, cv::Point2f(3.0f, 0.0f), 2, false);
+
+  const auto chosen = tree.selectNextChild(0, nullptr, false);
+  ASSERT_TRUE(chosen.has_value());
+  const auto * node = tree.find(*chosen);
+  ASSERT_NE(node, nullptr);
   EXPECT_EQ(node->openness_score, 1);
+}
+
+TEST(FrontierTree, SelectNextChild_SkipsUnrated_Negative)
+{
+  explorer_mission::FrontierTree tree;
+  tree.createRoot(cv::Point2f(0.0f, 0.0f));
+  tree.addChild(0, cv::Point2f(1.0f, 0.0f), explorer_mission::kOpennessNotRated, false);
+  tree.addChild(0, cv::Point2f(2.0f, 0.0f), explorer_mission::kOpennessNotRated, false);
+
+  EXPECT_FALSE(tree.selectNextChild(0).has_value());
+  EXPECT_FALSE(tree.selectNextChild(0, nullptr, false).has_value());
+}
+
+TEST(FrontierTree, SelectNextChild_SkipsFullyExplored_Negative)
+{
+  explorer_mission::FrontierTree tree;
+  tree.createRoot(cv::Point2f(0.0f, 0.0f));
+  const uint32_t high = tree.addChild(0, cv::Point2f(1.0f, 0.0f), 4, false);
+  tree.addChild(0, cv::Point2f(2.0f, 0.0f), 1, false);
+  tree.markFullyExplored(high);
+
+  const auto chosen = tree.selectNextChild(0);
+  ASSERT_TRUE(chosen.has_value());
+  EXPECT_EQ(tree.find(*chosen)->openness_score, 1);
 }
 
 TEST(FrontierTree, TieBreakUsesRandomCandidate)

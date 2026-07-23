@@ -49,6 +49,7 @@ class CmdVelToDiscreteNode(Node):
         self._pending: Optional[tuple[int, int]] = None
         self._busy = False
         self._last_dispatch_ns = 0
+        self._last_turn_direction: Optional[int] = None
 
         self.create_subscription(Twist, cmd_vel_topic, self._cmd_vel_cb, 10)
         self.create_timer(1.0 / dispatch_hz, self._dispatch_tick)
@@ -67,9 +68,22 @@ class CmdVelToDiscreteNode(Node):
                 max_linear_m_s=self._max_linear,
                 max_angular_deg_s=self._max_angular_deg,
             )
-        intent = cmd_vel_to_intent(linear_x, angular_z, self._thresholds)
+        intent = cmd_vel_to_intent(
+            linear_x,
+            angular_z,
+            self._thresholds,
+            last_turn_direction=self._last_turn_direction,
+        )
         if intent is None:
+            self._last_turn_direction = None
             return
+        if intent.direction in (
+            DiscreteMove.Goal.TURN_LEFT,
+            DiscreteMove.Goal.TURN_RIGHT,
+        ):
+            self._last_turn_direction = intent.direction
+        else:
+            self._last_turn_direction = None
         with self._lock:
             self._pending = (intent.direction, intent.steps)
 

@@ -95,7 +95,8 @@ bool FrontierTree::hasUnexploredNodesExcluding(uint32_t id_a, uint32_t id_b) con
 
 std::optional<uint32_t> FrontierTree::selectNextChild(
   uint32_t parent_id,
-  std::mt19937 * rng) const
+  std::mt19937 * rng,
+  bool prefer_highest) const
 {
   const TreeNode * parent = find(parent_id);
   if (!parent) {
@@ -103,7 +104,8 @@ std::optional<uint32_t> FrontierTree::selectNextChild(
   }
 
   std::vector<uint32_t> candidates;
-  uint8_t best_score = std::numeric_limits<uint8_t>::max();
+  bool have_best = false;
+  uint8_t best_score = 0;
   for (uint32_t child_id : parent->children_ids) {
     const TreeNode * child = find(child_id);
     if (!child || child->fully_explored) {
@@ -112,10 +114,14 @@ std::optional<uint32_t> FrontierTree::selectNextChild(
     if (child->openness_score == kOpennessNotRated) {
       continue;
     }
-    if (child->openness_score < best_score) {
+    const bool better = !have_best ||
+      (prefer_highest ? child->openness_score > best_score :
+      child->openness_score < best_score);
+    if (better) {
       best_score = child->openness_score;
       candidates.clear();
       candidates.push_back(child_id);
+      have_best = true;
     } else if (child->openness_score == best_score) {
       candidates.push_back(child_id);
     }

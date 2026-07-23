@@ -92,6 +92,7 @@ def generate_launch_description() -> LaunchDescription:
                 "frontier_detection_radius": frontier_detection_radius,
                 "frontier_exclusion_radius": frontier_exclusion_radius,
                 "publish_debug_topics": publish_debug_topics,
+                "dfs_prefer_highest_openness": True,
             }],
             output="screen",
         ),

@@ -1,5 +1,6 @@
 #include "explorer_mission/nav2_navigator.hpp"
 
+#include <cmath>
 #include <future>
 
 #include <nav2_msgs/action/navigate_to_pose.hpp>
@@ -34,7 +35,8 @@ bool Nav2Navigator::navigateToPose(
   double total_timeout_s,
   double stuck_timeout_s,
   double stuck_distance_m,
-  const std::function<bool()> & tick)
+  const std::function<bool()> & tick,
+  double goal_accept_radius_m)
 {
   (void)stuck_distance_m;
   last_error_.clear();
@@ -76,6 +78,12 @@ bool Nav2Navigator::navigateToPose(
       return false;
     }
 
+    if (goal_accept_radius_m > 0.0 && withinGoalAcceptRadius(x, y, goal_accept_radius_m)) {
+      cancel();
+      active_goal_handle_.reset();
+      return true;
+    }
+
     if (isStuck(stuck_timeout_s)) {
       cancel();
       last_error_ = "NavigateToPose stuck timeout";
@@ -115,6 +123,10 @@ bool Nav2Navigator::navigateToPose(
 void Nav2Navigator::noteProgress(
   double x, double y, double stuck_distance_m, double /*stuck_timeout_s*/)
 {
+  current_x_ = x;
+  current_y_ = y;
+  have_current_pose_ = true;
+
   if (!have_progress_anchor_) {
     progress_x_ = x;
     progress_y_ = y;
@@ -142,6 +154,16 @@ bool Nav2Navigator::isStuck(double stuck_timeout_s) const
 void Nav2Navigator::resetProgress()
 {
   have_progress_anchor_ = false;
+  have_current_pose_ = false;
+}
+
+bool Nav2Navigator::withinGoalAcceptRadius(
+  double goal_x, double goal_y, double radius_m) const
+{
+  if (!have_current_pose_ || radius_m <= 0.0) {
+    return false;
+  }
+  return std::hypot(current_x_ - goal_x, current_y_ - goal_y) <= radius_m;
 }
 
 }  // namespace explorer_mission

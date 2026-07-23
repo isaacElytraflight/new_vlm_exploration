@@ -13,6 +13,8 @@ class CmdVelThresholds:
     # Pure rotate-in-place (linear≈0): accept small angular so Nav2 can align.
     angular_threshold: float = 0.05
     linear_threshold: float = 0.03
+    # Once turning, ignore opposite angular below this (stops ±0.1 rad/s twitch).
+    turn_flip_angular_threshold: float = 0.2
     turn_step_deg: float = 10.0
     move_step_m: float = 0.25
 
@@ -27,6 +29,7 @@ def cmd_vel_to_intent(
     linear_x: float,
     angular_z: float,
     thresholds: CmdVelThresholds | None = None,
+    last_turn_direction: int | None = None,
 ) -> Optional[DiscreteMoveIntent]:
     """Return a single discrete step intent, or None if below thresholds.
 
@@ -34,6 +37,9 @@ def cmd_vel_to_intent(
     a little angular with forward velocity; angular-first priority caused endless
     10° turns until nearly perfectly aligned (Habitat jitter).
     Rotate-in-place only when linear is below threshold.
+
+    When already turning, require |angular_z| >= turn_flip_angular_threshold to
+    reverse direction — otherwise RPP ±0.1 rad/s flips cancel as 10° left/right.
     """
     t = thresholds or CmdVelThresholds()
     if abs(linear_x) > t.linear_threshold:
@@ -45,6 +51,12 @@ def cmd_vel_to_intent(
         direction = (
             DiscreteMove.Goal.TURN_LEFT if angular_z > 0 else DiscreteMove.Goal.TURN_RIGHT
         )
+        if (
+            last_turn_direction is not None
+            and direction != last_turn_direction
+            and abs(angular_z) < t.turn_flip_angular_threshold
+        ):
+            direction = last_turn_direction
         return DiscreteMoveIntent(direction=direction, steps=1)
     return None
 

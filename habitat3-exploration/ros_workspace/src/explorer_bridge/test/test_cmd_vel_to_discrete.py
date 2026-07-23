@@ -6,7 +6,6 @@ import pytest
 from explorer_msgs.action import DiscreteMove
 
 from explorer_bridge.cmd_vel_to_discrete import (
-    CmdVelThresholds,
     apply_realtime_rate_cap,
     cmd_vel_to_intent,
 )
@@ -59,6 +58,30 @@ def test_cmd_vel_curvature_must_not_force_turn_negative():
 def test_cmd_vel_below_threshold_negative():
     intent = cmd_vel_to_intent(0.01, 0.01)
     assert intent is None
+
+
+def test_turn_hysteresis_holds_direction_positive():
+    """Once turning left, weak opposite angular must not flip (Habitat 10° twitch)."""
+    left = DiscreteMove.Goal.TURN_LEFT
+    intent = cmd_vel_to_intent(0.0, -0.1, last_turn_direction=left)
+    assert intent is not None
+    assert intent.direction == left
+
+
+def test_turn_hysteresis_allows_strong_flip_positive():
+    """Strong opposite angular may reverse (real heading-error sign change)."""
+    left = DiscreteMove.Goal.TURN_LEFT
+    intent = cmd_vel_to_intent(0.0, -0.4, last_turn_direction=left)
+    assert intent is not None
+    assert intent.direction == DiscreteMove.Goal.TURN_RIGHT
+
+
+def test_turn_hysteresis_weak_flip_rejected_negative():
+    """Negative: ±0.1 left/right flip is the observed yaw twitch failure mode."""
+    left = DiscreteMove.Goal.TURN_LEFT
+    intent = cmd_vel_to_intent(0.0, -0.1, last_turn_direction=left)
+    assert intent is not None
+    assert intent.direction != DiscreteMove.Goal.TURN_RIGHT
 
 
 def test_realtime_rate_cap_positive():

@@ -6,6 +6,118 @@ Add a new dated section at the top when you work on this repo.
 
 ---
 
+## 2026-07-22 — Session: goal accept, DFS order, unknown lethal, motion stuck
+
+### Landed
+
+| Item | What |
+|------|------|
+| **~1 m goal accept** | Mission-side `Nav2Navigator::goal_accept_radius_m` (default 1.0). **Not** Nav2 `xy_goal_tolerance` (see below). |
+| **DFS child order** | `selectNextChild(..., prefer_highest=true)` default; ROS param `dfs_prefer_highest_openness`; Elytra oneshots (to become a single toggle). |
+| **Unknown = lethal** | Navfn `allow_unknown: false`. Frontiers still on `/grid_map` free↔unknown. |
+| **Yaw twitch** | Turn-direction hysteresis in `cmd_vel_to_intent`; `rotate_to_heading_min_angle` 1.047→0.4. |
+| **Sit on blue path** | Root cause + fix below. |
+
+### Critical bug: `xy_goal_tolerance: 1.0` froze the robot
+
+**Symptom:** Valid blue `/plan`, robot stationary, `/cmd_vel` ≈ `angular=0.001`, `Passing new path`, then stuck-timeout cancel (code 6).
+
+**Cause:** RPP reuses goal-checker `xy_goal_tolerance` as `goal_dist_tol_` for **rotate-to-goal-heading**. Lookahead carrot is only 0.3–0.9 m, so with tolerance 1.0 the controller *always* thought it was near the goal, rotated to goal yaw, and never drove.
+
+**Fix:** Keep Nav2 `xy_goal_tolerance: 0.25` (**must stay `< min_lookahead_dist`**). ~1 m acceptance is only in `Nav2Navigator`.
+
+**Do not re-try:** Raising Nav2 `xy_goal_tolerance` to ~1 m to “accept early.”
+
+### Also observed (not fully fixed this session)
+
+- Ollama `Read timed out (30s)` under 8-way parallel frontier rating → score 0 / drop children.
+- VLM scores still cluster 3–4 (calibration backlog).
+- `known_pose_mapper` exact-stamp cache full + costmap TF “earlier than transform cache” noise.
+
+### Next backlog (this session)
+
+1. DFS highest/lowest as **one toggle** (like Real-time motion), not two buttons.
+2. Full 360° spin on path update — suspect turn hysteresis holding the long way; prefer shorter left/right.
+3. **Same-batch frontier dedupe** (~1 m): drop nearer duplicates within one detect round.
+4. Later: laser scan / walls weak — consider depth point-cloud mapping.
+5. Nav Plan view: thin **green** parent→child tree edges.
+6. Toggle: attach new frontier to **nearest tree node** (default on).
+7. **High priority:** VLM queue parallel with motion; if score ≥ 3, start navigating while other ratings continue.
+
+### Ops
+
+Stop → Run after Nav2 YAML / explore_node C++ changes. Reconnect Elytra when `project.yaml` / UI toggles change.
+
+---
+
+## 2026-07-22 — Robot sits on blue path (xy_goal_tolerance broke RPP)
+
+### Symptom
+Valid global plan (blue line) but robot never moves; `/cmd_vel` ≈ 0;
+`Passing new path` then `NavigateToPose stuck timeout` / cancel (code 6).
+
+### Cause
+`xy_goal_tolerance: 1.0` is reused by RPP as `goal_dist_tol_` for
+**rotate-to-goal-heading**. Lookahead carrot is only 0.3–0.9 m, so the robot
+was *always* in rotate-to-goal mode and never commanded forward.
+
+### Fix
+1. Revert Nav2 `xy_goal_tolerance` to `0.25` (must stay `< min_lookahead_dist`).
+2. Keep ~1 m acceptance in `Nav2Navigator` via `goal_accept_radius_m` (default 1.0).
+
+### Ops
+Stop → Run (Nav2 YAML + rebuild explore_node).
+
+---
+
+## 2026-07-22 — Yaw twitch: pure-rotate ±0.1 oscillation
+
+### Symptom
+Robot twitches around a heading (no XY progress); Nav2 spam
+`Passing new path`; NavigateToPose aborts (code 6 = ABORTED).
+
+### Cause
+Live `/cmd_vel` was pure `angular.z=±0.1`, `linear=0` (RPP rotate-to-heading
+with `rotate_to_heading_min_angle=±60°`). Discrete 10° left/right canceled;
+stuck timeout aborted.
+
+### Fix
+1. Turn-direction hysteresis in `cmd_vel_to_intent` (ignore weak opposite
+   angular below 0.2 rad/s once a turn direction is committed).
+2. `rotate_to_heading_min_angle` 1.047 → 0.4 so RPP starts driving sooner.
+
+### Ops
+Stop → Run (Python bind-mounted; Nav2 YAML needs episode restart).
+
+---
+
+## 2026-07-22 — Goal 1 m / DFS order toggle / unknown lethal
+
+Landed backlog items 1–3 from 2026-07-21 closeout.
+
+### Changes
+
+1. **~1 m goal acceptance** — `nav2_params.yaml` `xy_goal_tolerance: 0.15` → `1.0` (Habitat step is 0.25 m; tight XY caused orbiting).
+2. **DFS child order toggle** — `FrontierTree::selectNextChild(..., prefer_highest=true)` default highest-first; `/explore` param `dfs_prefer_highest_openness` with live `on_set` callback; Elytra oneshot buttons **DFS Highest First** / **DFS Lowest First** → `set_dfs_order.sh`.
+3. **Unknown = lethal** — Navfn `allow_unknown: false`. Frontiers still use `/grid_map` free↔unknown (unchanged).
+
+### Tests
+
+- `test_nav2_params.py`: xy≈1 m + allow_unknown false (pos/neg)
+- `test_frontier_tree` gtest: highest default, lowest mode, skip unrated/explored
+- `test_dfs_order_buttons.py`: button + script guards
+- `colcon build/test explorer_mission` green in container
+
+### Ops
+
+Reconnect Elytra (new buttons in `project.yaml`). Stop → Run episode so Nav2 YAML + rebuilt explore_node load.
+
+### Still open
+
+4. VLM openness calibration (scores cluster 3–4).
+
+---
+
 ## 2026-07-21 — Day closeout: mapping → Nav2 motion → dashboard (session summary)
 
 Long session landing a working discrete-step exploration loop with VLM-rated

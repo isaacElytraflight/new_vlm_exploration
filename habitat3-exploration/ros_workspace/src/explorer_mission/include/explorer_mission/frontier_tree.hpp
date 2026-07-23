@@ -38,7 +38,10 @@ public:
   void markFullyExplored(uint32_t id);
   bool hasUnexploredChildren(uint32_t id) const;
   bool hasUnexploredNodesExcluding(uint32_t id_a, uint32_t id_b) const;
-  std::optional<uint32_t> selectNextChild(uint32_t parent_id, std::mt19937 * rng = nullptr) const;
+  std::optional<uint32_t> selectNextChild(
+    uint32_t parent_id,
+    std::mt19937 * rng = nullptr,
+    bool prefer_highest = true) const;
   std::vector<cv::Point2f> allNodePositions() const;
   TreeNode * find(uint32_t id);
   const TreeNode * find(uint32_t id) const;

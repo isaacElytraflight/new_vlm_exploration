@@ -11,6 +11,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/exceptions.h>
@@ -57,6 +58,23 @@ public:
     min_contour_pixels_ = declare_parameter<int>("min_contour_pixels", 15);
     vlm_scores_timeout_s_ = declare_parameter<double>("vlm_scores_timeout_s", 120.0);
     publish_debug_topics_ = declare_parameter<bool>("publish_debug_topics", false);
+    dfs_prefer_highest_openness_ = declare_parameter<bool>("dfs_prefer_highest_openness", true);
+    goal_accept_radius_m_ = declare_parameter<double>("goal_accept_radius_m", 1.0);
+
+    param_callback_handle_ = add_on_set_parameters_callback(
+      [this](const std::vector<rclcpp::Parameter> & params) {
+        rcl_interfaces::msg::SetParametersResult result;
+        result.successful = true;
+        for (const auto & p : params) {
+          if (p.get_name() == "dfs_prefer_highest_openness") {
+            dfs_prefer_highest_openness_ = p.as_bool();
+            RCLCPP_INFO(
+              get_logger(), "dfs_prefer_highest_openness set to %s",
+              dfs_prefer_highest_openness_ ? "true (highest first)" : "false (lowest first)");
+          }
+        }
+        return result;
+      });
 
     if (navigation_mode_ == "nav2") {
       nav2_navigator_ = std::make_unique<explorer_mission::Nav2Navigator>(this);
@@ -224,7 +242,8 @@ public:
         continue;
       }
 
-      const auto child_id = tree_.selectNextChild(current->id);
+      const auto child_id = tree_.selectNextChild(
+        current->id, nullptr, dfs_prefer_highest_openness_);
       if (!child_id.has_value()) {
         continue;
       }
@@ -597,7 +616,8 @@ private:
           nav2_navigator_->noteProgress(
             current_pos_.x, current_pos_.y, 0.1, 60.0);
           return true;
-        });
+        },
+        goal_accept_radius_m_);
       if (!ok) {
         RCLCPP_WARN(
           get_logger(), "Nav2 navigation failed: %s",
@@ -655,9 +675,12 @@ private:
   int min_contour_pixels_{15};
   double vlm_scores_timeout_s_{120.0};
   bool publish_debug_topics_{false};
+  bool dfs_prefer_highest_openness_{true};
+  double goal_accept_radius_m_{1.0};
 
   std::unique_ptr<explorer_mission::Nav2Navigator> nav2_navigator_;
   explorer_mission::FrontierTree tree_;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
 
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
