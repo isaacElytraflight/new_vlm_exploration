@@ -79,9 +79,19 @@ def test_turn_hysteresis_allows_strong_flip_positive():
 def test_turn_hysteresis_weak_flip_rejected_negative():
     """Negative: ±0.1 left/right flip is the observed yaw twitch failure mode."""
     left = DiscreteMove.Goal.TURN_LEFT
-    intent = cmd_vel_to_intent(0.0, -0.1, last_turn_direction=left)
+    intent = cmd_vel_to_intent(0.0, -0.1, last_turn_direction=left, consecutive_turn_steps=3)
     assert intent is not None
     assert intent.direction != DiscreteMove.Goal.TURN_RIGHT
+
+
+def test_turn_hysteresis_allows_flip_after_180deg_positive():
+    """After ~180° committed one way, weak opposite may take the short path."""
+    left = DiscreteMove.Goal.TURN_LEFT
+    intent = cmd_vel_to_intent(
+        0.0, -0.1, last_turn_direction=left, consecutive_turn_steps=18
+    )
+    assert intent is not None
+    assert intent.direction == DiscreteMove.Goal.TURN_RIGHT
 
 
 def test_realtime_rate_cap_positive():

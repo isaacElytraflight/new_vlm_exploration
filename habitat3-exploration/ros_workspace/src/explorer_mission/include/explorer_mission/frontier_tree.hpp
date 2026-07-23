@@ -42,6 +42,12 @@ public:
     uint32_t parent_id,
     std::mt19937 * rng = nullptr,
     bool prefer_highest = true) const;
+  /// Best among explicit ids (skips unrated / fully explored). Used for early-nav + nearest-parent.
+  std::optional<uint32_t> selectBestAmong(
+    const std::vector<uint32_t> & candidate_ids,
+    std::mt19937 * rng = nullptr,
+    bool prefer_highest = true) const;
+  std::optional<uint32_t> findNearestNode(const cv::Point2f & position) const;
   std::vector<cv::Point2f> allNodePositions() const;
   TreeNode * find(uint32_t id);
   const TreeNode * find(uint32_t id) const;

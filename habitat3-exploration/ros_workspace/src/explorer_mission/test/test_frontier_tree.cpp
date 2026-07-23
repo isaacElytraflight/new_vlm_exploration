@@ -113,6 +113,36 @@ TEST(FrontierTree, HasUnexploredNodesExcluding_siblingRemaining)
   EXPECT_TRUE(tree.hasUnexploredNodesExcluding(child_a, 0));
 }
 
+TEST(FrontierTree, FindNearestNode_positive)
+{
+  explorer_mission::FrontierTree tree;
+  tree.createRoot(cv::Point2f(0.0f, 0.0f));
+  tree.addChild(0, cv::Point2f(5.0f, 0.0f), 2, false);
+  tree.addChild(0, cv::Point2f(1.0f, 0.0f), 2, false);
+  const auto nearest = tree.findNearestNode(cv::Point2f(1.2f, 0.1f));
+  ASSERT_TRUE(nearest.has_value());
+  EXPECT_EQ(*nearest, 2u);
+}
+
+TEST(FrontierTree, SelectBestAmong_positive)
+{
+  explorer_mission::FrontierTree tree;
+  tree.createRoot(cv::Point2f(0.0f, 0.0f));
+  const uint32_t a = tree.addChild(0, cv::Point2f(1.0f, 0.0f), 2, false);
+  const uint32_t b = tree.addChild(0, cv::Point2f(2.0f, 0.0f), 4, false);
+  const auto chosen = tree.selectBestAmong({a, b}, nullptr, true);
+  ASSERT_TRUE(chosen.has_value());
+  EXPECT_EQ(*chosen, b);
+}
+
+TEST(FrontierTree, SelectBestAmong_skipsUnrated_negative)
+{
+  explorer_mission::FrontierTree tree;
+  tree.createRoot(cv::Point2f(0.0f, 0.0f));
+  const uint32_t a = tree.addChild(0, cv::Point2f(1.0f, 0.0f), 255, false);
+  EXPECT_FALSE(tree.selectBestAmong({a}, nullptr, true).has_value());
+}
+
 int main(int argc, char ** argv)
 {
   ::testing::InitGoogleTest(&argc, argv);

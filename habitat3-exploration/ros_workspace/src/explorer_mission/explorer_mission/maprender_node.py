@@ -185,6 +185,17 @@ class MapRenderNode(Node):
         font = cv2.FONT_HERSHEY_SIMPLEX
         current_id = self.tree_msg.current_node_id if self.tree_msg else 0
         if self.tree_msg and self.tree_msg.nodes:
+            by_id = {int(n.id): n for n in self.tree_msg.nodes}
+            tree_edge_color = (0, 200, 0)  # thin green parent→child
+            for node in self.tree_msg.nodes:
+                if int(node.parent_id) < 0:
+                    continue
+                parent = by_id.get(int(node.parent_id))
+                if parent is None:
+                    continue
+                p0 = world_to_flipped_pixel(parent.position.x, parent.position.y)
+                p1 = world_to_flipped_pixel(node.position.x, node.position.y)
+                cv2.line(color, p0, p1, tree_edge_color, 1, cv2.LINE_AA)
             for node in self.tree_msg.nodes:
                 px, py = world_to_flipped_pixel(node.position.x, node.position.y)
                 if node.fully_explored:

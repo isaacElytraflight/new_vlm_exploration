@@ -181,6 +181,30 @@ TEST(FrontierDetection, ExclusionMaskAllowsFarFrontier_positive)
   EXPECT_FALSE(near.empty());
 }
 
+TEST(FrontierDetection, DedupeSameBatchCloseMidpoints_positive)
+{
+  const auto grid = makeTestGrid();
+  // Two synthetic 1-pixel contours at nearly the same world point.
+  std::vector<std::vector<cv::Point>> contours = {
+    {cv::Point(10, 10)},
+    {cv::Point(11, 10)},  // ~0.05 m away at 0.05 res — within 1 m
+    {cv::Point(50, 50)},  // far
+  };
+  const auto deduped = explorer_mission::dedupeContoursByMidpoint(contours, grid, 1.0);
+  EXPECT_EQ(deduped.size(), 2u);
+}
+
+TEST(FrontierDetection, DedupeSameBatchKeepsFar_negative)
+{
+  const auto grid = makeTestGrid();
+  std::vector<std::vector<cv::Point>> contours = {
+    {cv::Point(10, 10)},
+    {cv::Point(60, 60)},
+  };
+  const auto deduped = explorer_mission::dedupeContoursByMidpoint(contours, grid, 1.0);
+  EXPECT_EQ(deduped.size(), 2u);
+}
+
 int main(int argc, char ** argv)
 {
   ::testing::InitGoogleTest(&argc, argv);

@@ -2,13 +2,14 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
 #include <string>
 #include <thread>
 #include <vector>
-
+#include <unordered_set>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <rcl_interfaces/msg/set_parameters_result.hpp>
@@ -60,6 +61,8 @@ public:
     publish_debug_topics_ = declare_parameter<bool>("publish_debug_topics", false);
     dfs_prefer_highest_openness_ = declare_parameter<bool>("dfs_prefer_highest_openness", true);
     goal_accept_radius_m_ = declare_parameter<double>("goal_accept_radius_m", 1.0);
+    parent_to_nearest_node_ = declare_parameter<bool>("parent_to_nearest_node", true);
+    early_nav_min_score_ = declare_parameter<int>("early_nav_min_score", 3);
 
     param_callback_handle_ = add_on_set_parameters_callback(
       [this](const std::vector<rclcpp::Parameter> & params) {
@@ -71,6 +74,11 @@ public:
             RCLCPP_INFO(
               get_logger(), "dfs_prefer_highest_openness set to %s",
               dfs_prefer_highest_openness_ ? "true (highest first)" : "false (lowest first)");
+          } else if (p.get_name() == "parent_to_nearest_node") {
+            parent_to_nearest_node_ = p.as_bool();
+            RCLCPP_INFO(
+              get_logger(), "parent_to_nearest_node set to %s",
+              parent_to_nearest_node_ ? "true" : "false");
           }
         }
         return result;
@@ -184,6 +192,8 @@ public:
     performScanIfNeeded();
     tree_.createRoot(current_pos_);
     tree_.setCurrentNodeId(tree_.rootId());
+    scanned_node_ids_.clear();
+    last_new_child_ids_.clear();
     publishTree();
     publishPhase("idle", tree_.currentNodeId(), 0, false, "root created");
 
@@ -197,19 +207,44 @@ public:
         break;
       }
 
-      if (current->children_ids.empty()) {
+      if (scanned_node_ids_.count(current->id) == 0) {
         if (!detectAndRateChildren()) {
           RCLCPP_WARN(get_logger(), "Frontier detection/VLM rating failed; retrying.");
           rclcpp::sleep_for(std::chrono::seconds(1));
           continue;
         }
+        scanned_node_ids_.insert(tree_.currentNodeId());
         current = tree_.find(tree_.currentNodeId());
         if (!current) {
           break;
         }
       }
 
-      if (current->children_ids.empty() || !tree_.hasUnexploredChildren(current->id)) {
+      if (!tree_.hasUnexploredChildren(current->id)) {
+        // Nearest-parent may have attached frontiers elsewhere; try last batch.
+        const auto batch_pick = tree_.selectBestAmong(
+          last_new_child_ids_, nullptr, dfs_prefer_highest_openness_);
+        if (batch_pick.has_value()) {
+          explorer_mission::TreeNode * batch_child = tree_.find(*batch_pick);
+          if (batch_child && !batch_child->fully_explored &&
+            batch_child->openness_score != explorer_mission::kOpennessNotRated)
+          {
+            publishPhase(
+              "navigating", current->id, *batch_pick, false,
+              "batch/nearest child score=" + std::to_string(batch_child->openness_score));
+            const bool ok = navigateToPosition(batch_child->position, batch_child->position);
+            if (!ok) {
+              tree_.markFullyExplored(*batch_pick);
+              publishTree();
+              continue;
+            }
+            tree_.setCurrentNodeId(*batch_pick);
+            last_new_child_ids_.clear();
+            publishTree();
+            continue;
+          }
+        }
+
         tree_.markFullyExplored(current->id);
         publishTree();
         if (!tree_.hasUnexploredNodesExcluding(current->id, tree_.rootId())) {
@@ -291,6 +326,13 @@ private:
     std::lock_guard<std::mutex> lock(scores_mutex_);
     latest_scores_ = *msg;
     scores_received_ = true;
+    for (size_t i = 0; i < msg->frontier_ids.size() && i < msg->scores.size(); ++i) {
+      const uint32_t id = msg->frontier_ids[i];
+      accumulated_scores_[id] = msg->scores[i];
+      if (i < msg->reasonings.size()) {
+        accumulated_reasonings_[id] = msg->reasonings[i];
+      }
+    }
   }
 
   void publishTree()
@@ -355,20 +397,33 @@ private:
       grid, mask, min_contour_pixels_);
     contours = explorer_mission::filterContoursNearRobot(
       contours, grid, current_pos_, frontier_detection_radius_);
+    const size_t before_dedupe = contours.size();
+    contours = explorer_mission::dedupeContoursByMidpoint(
+      contours, grid, frontier_exclusion_radius_);
     RCLCPP_INFO(
       get_logger(),
-      "Frontier detect: kept=%zu keep_r=%.1fm excl_r=%.1fm",
-      contours.size(), frontier_detection_radius_, frontier_exclusion_radius_);
+      "Frontier detect: kept=%zu (deduped %zu→%zu) keep_r=%.1fm excl_r=%.1fm",
+      contours.size(), before_dedupe, contours.size(),
+      frontier_detection_radius_, frontier_exclusion_radius_);
 
+    last_new_child_ids_.clear();
     std::vector<uint32_t> new_child_ids;
     for (const auto & contour : contours) {
       const cv::Point2f midpoint = explorer_mission::frontierMidpointWorld(contour, grid);
+      uint32_t parent_id = tree_.currentNodeId();
+      if (parent_to_nearest_node_) {
+        const auto nearest = tree_.findNearestNode(midpoint);
+        if (nearest.has_value()) {
+          parent_id = *nearest;
+        }
+      }
       const uint32_t child_id = tree_.addChild(
-        tree_.currentNodeId(), midpoint, explorer_mission::kOpennessNotRated, false);
+        parent_id, midpoint, explorer_mission::kOpennessNotRated, false);
       if (child_id != std::numeric_limits<uint32_t>::max()) {
         new_child_ids.push_back(child_id);
       }
     }
+    last_new_child_ids_ = new_child_ids;
     publishTree();
 
     if (new_child_ids.empty()) {
@@ -466,6 +521,10 @@ private:
     {
       std::lock_guard<std::mutex> lock(scores_mutex_);
       scores_received_ = false;
+      for (uint32_t id : expected_ids) {
+        accumulated_scores_.erase(id);
+        accumulated_reasonings_.erase(id);
+      }
     }
 
     explorer_msgs::msg::FrontierViews views = buildFrontierViews(expected_ids);
@@ -478,15 +537,35 @@ private:
     while (rclcpp::ok() && (now() - start).seconds() < vlm_scores_timeout_s_) {
       rclcpp::sleep_for(std::chrono::milliseconds(100));
       std::lock_guard<std::mutex> lock(scores_mutex_);
-      if (!scores_received_) {
+      if (!scores_received_ && accumulated_scores_.empty()) {
         continue;
       }
-      if (latest_scores_.frontier_ids.size() != latest_scores_.scores.size()) {
-        continue;
+      size_t rated = 0;
+      bool early = false;
+      for (uint32_t id : expected) {
+        const auto it = accumulated_scores_.find(id);
+        if (it == accumulated_scores_.end()) {
+          continue;
+        }
+        ++rated;
+        if (static_cast<int>(it->second) >= early_nav_min_score_) {
+          early = true;
+        }
       }
-      std::set<uint32_t> received(
-        latest_scores_.frontier_ids.begin(), latest_scores_.frontier_ids.end());
-      if (received == expected) {
+      if (early) {
+        RCLCPP_INFO(
+          get_logger(),
+          "Early nav: at least one frontier scored >= %d (%zu/%zu rated)",
+          early_nav_min_score_, rated, expected.size());
+        for (const auto & entry : accumulated_scores_) {
+          tree_.setOpennessScore(entry.first, entry.second);
+        }
+        return true;
+      }
+      if (rated == expected.size() && !expected.empty()) {
+        for (const auto & entry : accumulated_scores_) {
+          tree_.setOpennessScore(entry.first, entry.second);
+        }
         return true;
       }
     }
@@ -496,12 +575,8 @@ private:
   void applyLatestScores()
   {
     std::lock_guard<std::mutex> lock(scores_mutex_);
-    for (size_t i = 0; i < latest_scores_.frontier_ids.size(); ++i) {
-      if (i >= latest_scores_.scores.size()) {
-        break;
-      }
-      tree_.setOpennessScore(
-        latest_scores_.frontier_ids[i], latest_scores_.scores[i]);
+    for (const auto & entry : accumulated_scores_) {
+      tree_.setOpennessScore(entry.first, entry.second);
     }
   }
 
@@ -677,10 +752,16 @@ private:
   bool publish_debug_topics_{false};
   bool dfs_prefer_highest_openness_{true};
   double goal_accept_radius_m_{1.0};
+  bool parent_to_nearest_node_{true};
+  int early_nav_min_score_{3};
 
   std::unique_ptr<explorer_mission::Nav2Navigator> nav2_navigator_;
   explorer_mission::FrontierTree tree_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
+  std::unordered_set<uint32_t> scanned_node_ids_;
+  std::vector<uint32_t> last_new_child_ids_;
+  std::map<uint32_t, uint8_t> accumulated_scores_;
+  std::map<uint32_t, std::string> accumulated_reasonings_;
 
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;

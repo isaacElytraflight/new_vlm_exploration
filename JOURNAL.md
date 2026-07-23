@@ -34,15 +34,15 @@ Add a new dated section at the top when you work on this repo.
 - VLM scores still cluster 3–4 (calibration backlog).
 - `known_pose_mapper` exact-stamp cache full + costmap TF “earlier than transform cache” noise.
 
-### Next backlog (this session)
+### Next backlog (this session) — in progress / landed
 
-1. DFS highest/lowest as **one toggle** (like Real-time motion), not two buttons.
-2. Full 360° spin on path update — suspect turn hysteresis holding the long way; prefer shorter left/right.
-3. **Same-batch frontier dedupe** (~1 m): drop nearer duplicates within one detect round.
+1. DFS highest/lowest as **one Elytra toggle** (like Real-time motion) — UI + `/sim/exploration-policy`.
+2. Full 360° spin — hysteresis capped at ~180° committed turn then allow weak flip.
+3. **Same-batch frontier dedupe** (~1 m) via `dedupeContoursByMidpoint`.
 4. Later: laser scan / walls weak — consider depth point-cloud mapping.
 5. Nav Plan view: thin **green** parent→child tree edges.
-6. Toggle: attach new frontier to **nearest tree node** (default on).
-7. **High priority:** VLM queue parallel with motion; if score ≥ 3, start navigating while other ratings continue.
+6. Toggle: attach new frontier to **nearest tree node** (default on) + batch select.
+7. **VLM partial scores**: `vlm_node` streams each rating; explore early-nav when score ≥ 3.
 
 ### Ops
 

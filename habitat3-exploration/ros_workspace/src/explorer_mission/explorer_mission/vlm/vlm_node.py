@@ -10,6 +10,7 @@ from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.node import Node
 
 from explorer_msgs.action import RateFrontierOpenness
+from explorer_msgs.msg import FrontierOpennessScores
 
 from explorer_mission.vlm.backends import get_backend
 from explorer_mission.vlm.backends.ollama import OllamaBackendError
@@ -59,6 +60,9 @@ class VlmNode(Node):
         super().__init__("vlm_server")
         self._backend = get_backend()
         self._backend.validate()
+        self._scores_pub = self.create_publisher(
+            FrontierOpennessScores, "exploration/vlm/scores", 10
+        )
         self._server = ActionServer(
             self,
             RateFrontierOpenness,
@@ -126,6 +130,12 @@ class VlmNode(Node):
                 frontier_id, score, reasoning = future.result()
                 scores_by_id[frontier_id] = score
                 reasonings_by_id[frontier_id] = reasoning
+                # Stream partial scores so explore can early-nav on score >= 3.
+                partial = FrontierOpennessScores()
+                partial.frontier_ids = [int(frontier_id)]
+                partial.scores = [int(score)]
+                partial.reasonings = [str(reasoning)]
+                self._scores_pub.publish(partial)
 
         feedback.status = 2
         goal_handle.publish_feedback(feedback)

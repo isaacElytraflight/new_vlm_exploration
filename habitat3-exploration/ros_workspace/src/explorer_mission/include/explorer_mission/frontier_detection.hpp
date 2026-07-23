@@ -53,4 +53,10 @@ cv::Point2f frontierMidpointWorld(
 
 double euclideanDist(const cv::Point2f & a, const cv::Point2f & b);
 
+/// Drop later contours whose midpoint is within radius_m of an earlier kept midpoint.
+std::vector<std::vector<cv::Point>> dedupeContoursByMidpoint(
+  const std::vector<std::vector<cv::Point>> & contours,
+  const nav_msgs::msg::OccupancyGrid & grid,
+  double radius_m);
+
 }  // namespace explorer_mission

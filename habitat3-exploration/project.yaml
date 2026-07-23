@@ -85,24 +85,6 @@ buttons:
     kind: script
     scriptPath: /workspace/scripts/run_movement_demo.sh
     oneshot: true
-  - id: dfs-highest
-    label: DFS Highest First
-    description: >-
-      Select next DFS child by highest VLM openness score (default policy).
-      Applies live to the running explore node.
-    kind: script
-    scriptPath: /workspace/scripts/set_dfs_order.sh
-    extraArgs: highest
-    oneshot: true
-  - id: dfs-lowest
-    label: DFS Lowest First
-    description: >-
-      Select next DFS child by lowest VLM openness score.
-      Applies live to the running explore node.
-    kind: script
-    scriptPath: /workspace/scripts/set_dfs_order.sh
-    extraArgs: lowest
-    oneshot: true
 
 views:
   - id: third-person

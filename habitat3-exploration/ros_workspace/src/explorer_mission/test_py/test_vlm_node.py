@@ -154,7 +154,7 @@ def test_ollama_query_builds_chat_payload_positive():
         payload = post.call_args.kwargs["json"]
         assert payload["model"] == backend.model_label
         assert payload["messages"][0]["images"]
-        assert payload["options"]["num_predict"] == 64
+        assert payload["options"]["num_predict"] == 192
 
 
 def test_gemini_backend_query_positive(monkeypatch):

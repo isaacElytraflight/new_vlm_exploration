@@ -1,6 +1,7 @@
 #include "explorer_mission/frontier_tree.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 namespace explorer_mission
@@ -138,6 +139,69 @@ std::optional<uint32_t> FrontierTree::selectNextChild(
   std::mt19937 & use_rng = rng ? *rng : local_rng;
   std::uniform_int_distribution<size_t> dist(0, candidates.size() - 1);
   return candidates[dist(use_rng)];
+}
+
+std::optional<uint32_t> FrontierTree::selectBestAmong(
+  const std::vector<uint32_t> & candidate_ids,
+  std::mt19937 * rng,
+  bool prefer_highest) const
+{
+  std::vector<uint32_t> candidates;
+  bool have_best = false;
+  uint8_t best_score = 0;
+  for (uint32_t child_id : candidate_ids) {
+    const TreeNode * child = find(child_id);
+    if (!child || child->fully_explored) {
+      continue;
+    }
+    if (child->openness_score == kOpennessNotRated) {
+      continue;
+    }
+    const bool better = !have_best ||
+      (prefer_highest ? child->openness_score > best_score :
+      child->openness_score < best_score);
+    if (better) {
+      best_score = child->openness_score;
+      candidates.clear();
+      candidates.push_back(child_id);
+      have_best = true;
+    } else if (child->openness_score == best_score) {
+      candidates.push_back(child_id);
+    }
+  }
+
+  if (candidates.empty()) {
+    return std::nullopt;
+  }
+  if (candidates.size() == 1) {
+    return candidates.front();
+  }
+
+  std::mt19937 local_rng{std::random_device{}()};
+  std::mt19937 & use_rng = rng ? *rng : local_rng;
+  std::uniform_int_distribution<size_t> dist(0, candidates.size() - 1);
+  return candidates[dist(use_rng)];
+}
+
+std::optional<uint32_t> FrontierTree::findNearestNode(const cv::Point2f & position) const
+{
+  if (nodes_.empty()) {
+    return std::nullopt;
+  }
+  uint32_t best_id = nodes_.front().id;
+  double best_dist = std::hypot(
+    position.x - nodes_.front().position.x,
+    position.y - nodes_.front().position.y);
+  for (const auto & node : nodes_) {
+    const double d = std::hypot(
+      position.x - node.position.x,
+      position.y - node.position.y);
+    if (d < best_dist) {
+      best_dist = d;
+      best_id = node.id;
+    }
+  }
+  return best_id;
 }
 
 std::vector<cv::Point2f> FrontierTree::allNodePositions() const

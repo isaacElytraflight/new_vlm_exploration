@@ -13,8 +13,10 @@ class CmdVelThresholds:
     # Pure rotate-in-place (linear≈0): accept small angular so Nav2 can align.
     angular_threshold: float = 0.05
     linear_threshold: float = 0.03
-    # Once turning, ignore opposite angular below this (stops ±0.1 rad/s twitch).
+    # Once turning, ignore opposite angular below this — BUT max_turn_steps_before_flip
+    # caps long-way spins when path updates flip the short direction.
     turn_flip_angular_threshold: float = 0.2
+    max_turn_steps_before_flip: int = 18  # 18 * 10° = 180°
     turn_step_deg: float = 10.0
     move_step_m: float = 0.25
 
@@ -30,6 +32,7 @@ def cmd_vel_to_intent(
     angular_z: float,
     thresholds: CmdVelThresholds | None = None,
     last_turn_direction: int | None = None,
+    consecutive_turn_steps: int = 0,
 ) -> Optional[DiscreteMoveIntent]:
     """Return a single discrete step intent, or None if below thresholds.
 
@@ -39,7 +42,8 @@ def cmd_vel_to_intent(
     Rotate-in-place only when linear is below threshold.
 
     When already turning, require |angular_z| >= turn_flip_angular_threshold to
-    reverse direction — otherwise RPP ±0.1 rad/s flips cancel as 10° left/right.
+    reverse direction — unless we have already committed max_turn_steps_before_flip
+    (≈180°), in which case allow a weak opposite to take the short way.
     """
     t = thresholds or CmdVelThresholds()
     if abs(linear_x) > t.linear_threshold:
@@ -51,10 +55,12 @@ def cmd_vel_to_intent(
         direction = (
             DiscreteMove.Goal.TURN_LEFT if angular_z > 0 else DiscreteMove.Goal.TURN_RIGHT
         )
+        allow_weak_flip = consecutive_turn_steps >= t.max_turn_steps_before_flip
         if (
             last_turn_direction is not None
             and direction != last_turn_direction
             and abs(angular_z) < t.turn_flip_angular_threshold
+            and not allow_weak_flip
         ):
             direction = last_turn_direction
         return DiscreteMoveIntent(direction=direction, steps=1)

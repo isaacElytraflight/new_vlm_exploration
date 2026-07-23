@@ -160,4 +160,34 @@ double euclideanDist(const cv::Point2f & a, const cv::Point2f & b)
   return std::sqrt(dx * dx + dy * dy);
 }
 
+std::vector<std::vector<cv::Point>> dedupeContoursByMidpoint(
+  const std::vector<std::vector<cv::Point>> & contours,
+  const nav_msgs::msg::OccupancyGrid & grid,
+  double radius_m)
+{
+  if (radius_m <= 0.0 || contours.size() <= 1) {
+    return contours;
+  }
+  std::vector<std::vector<cv::Point>> kept;
+  std::vector<cv::Point2f> kept_mids;
+  kept.reserve(contours.size());
+  kept_mids.reserve(contours.size());
+  for (const auto & contour : contours) {
+    const cv::Point2f mid = frontierMidpointWorld(contour, grid);
+    bool too_close = false;
+    for (const auto & prev : kept_mids) {
+      if (euclideanDist(mid, prev) <= radius_m) {
+        too_close = true;
+        break;
+      }
+    }
+    if (too_close) {
+      continue;  // drop later (more recent in batch) duplicate
+    }
+    kept.push_back(contour);
+    kept_mids.push_back(mid);
+  }
+  return kept;
+}
+
 }  // namespace explorer_mission

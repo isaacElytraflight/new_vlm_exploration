@@ -50,6 +50,7 @@ class CmdVelToDiscreteNode(Node):
         self._busy = False
         self._last_dispatch_ns = 0
         self._last_turn_direction: Optional[int] = None
+        self._consecutive_turn_steps = 0
 
         self.create_subscription(Twist, cmd_vel_topic, self._cmd_vel_cb, 10)
         self.create_timer(1.0 / dispatch_hz, self._dispatch_tick)
@@ -73,17 +74,24 @@ class CmdVelToDiscreteNode(Node):
             angular_z,
             self._thresholds,
             last_turn_direction=self._last_turn_direction,
+            consecutive_turn_steps=self._consecutive_turn_steps,
         )
         if intent is None:
             self._last_turn_direction = None
+            self._consecutive_turn_steps = 0
             return
         if intent.direction in (
             DiscreteMove.Goal.TURN_LEFT,
             DiscreteMove.Goal.TURN_RIGHT,
         ):
+            if intent.direction == self._last_turn_direction:
+                self._consecutive_turn_steps += 1
+            else:
+                self._consecutive_turn_steps = 1
             self._last_turn_direction = intent.direction
         else:
             self._last_turn_direction = None
+            self._consecutive_turn_steps = 0
         with self._lock:
             self._pending = (intent.direction, intent.steps)
 
