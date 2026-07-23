@@ -27,3 +27,6 @@ node_modules/
 # OS / editor cruft
 .DS_Store
 Thumbs.db
+
+# Local desktop screenshots (not project assets)
+/Screenshot*.png
