@@ -50,6 +50,14 @@ public:
   std::optional<uint32_t> findNearestNode(
     const cv::Point2f & position,
     const std::vector<uint32_t> * candidate_ids = nullptr) const;
+  /// Parent for a newly detected frontier.
+  /// When parent_to_nearest is false: always current_node_id (robot's scan node).
+  /// When true: nearest node in parent_pool (or whole tree) to frontier_midpoint.
+  uint32_t resolveFrontierParentId(
+    bool parent_to_nearest,
+    uint32_t current_node_id,
+    const cv::Point2f & frontier_midpoint,
+    const std::vector<uint32_t> * parent_pool = nullptr) const;
   std::vector<uint32_t> allNodeIds() const;
   std::vector<cv::Point2f> allNodePositions() const;
   TreeNode * find(uint32_t id);

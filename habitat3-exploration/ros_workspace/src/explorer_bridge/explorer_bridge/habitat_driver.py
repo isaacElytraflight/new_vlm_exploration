@@ -25,6 +25,9 @@ class HabitatDriver:
     def get_map(self) -> MapData:
         return self._client.get_map()
 
+    def get_floor_area(self) -> tuple[float, float]:
+        return self._client.get_floor_area()
+
     def reset(self) -> None:
         self._client.reset()
 

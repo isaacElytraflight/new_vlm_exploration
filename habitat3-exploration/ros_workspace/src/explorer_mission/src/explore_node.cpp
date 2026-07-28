@@ -221,27 +221,29 @@ public:
       }
 
       if (!tree_.hasUnexploredChildren(current->id)) {
-        // Nearest-parent may have attached frontiers elsewhere; try last batch.
-        const auto batch_pick = tree_.selectBestAmong(
-          last_new_child_ids_, nullptr, dfs_prefer_highest_openness_);
-        if (batch_pick.has_value()) {
-          explorer_mission::TreeNode * batch_child = tree_.find(*batch_pick);
-          if (batch_child && !batch_child->fully_explored &&
-            batch_child->openness_score != explorer_mission::kOpennessNotRated)
-          {
-            publishPhase(
-              "navigating", current->id, *batch_pick, false,
-              "batch/nearest child score=" + std::to_string(batch_child->openness_score));
-            const bool ok = navigateToPosition(batch_child->position, batch_child->position);
-            if (!ok) {
-              tree_.markFullyExplored(*batch_pick);
+        // Only when nearest-parent attached frontiers under other nodes.
+        if (parent_to_nearest_node_) {
+          const auto batch_pick = tree_.selectBestAmong(
+            last_new_child_ids_, nullptr, dfs_prefer_highest_openness_);
+          if (batch_pick.has_value()) {
+            explorer_mission::TreeNode * batch_child = tree_.find(*batch_pick);
+            if (batch_child && !batch_child->fully_explored &&
+              batch_child->openness_score != explorer_mission::kOpennessNotRated)
+            {
+              publishPhase(
+                "navigating", current->id, *batch_pick, false,
+                "batch/nearest child score=" + std::to_string(batch_child->openness_score));
+              const bool ok = navigateToPosition(batch_child->position, batch_child->position);
+              if (!ok) {
+                tree_.markFullyExplored(*batch_pick);
+                publishTree();
+                continue;
+              }
+              tree_.setCurrentNodeId(*batch_pick);
+              last_new_child_ids_.clear();
               publishTree();
               continue;
             }
-            tree_.setCurrentNodeId(*batch_pick);
-            last_new_child_ids_.clear();
-            publishTree();
-            continue;
           }
         }
 
@@ -415,13 +417,8 @@ private:
     std::vector<uint32_t> new_child_ids;
     for (const auto & contour : contours) {
       const cv::Point2f midpoint = explorer_mission::frontierMidpointWorld(contour, grid);
-      uint32_t parent_id = tree_.currentNodeId();
-      if (parent_to_nearest_node_) {
-        const auto nearest = tree_.findNearestNode(midpoint, &parent_pool);
-        if (nearest.has_value()) {
-          parent_id = *nearest;
-        }
-      }
+      const uint32_t parent_id = tree_.resolveFrontierParentId(
+        parent_to_nearest_node_, tree_.currentNodeId(), midpoint, &parent_pool);
       const uint32_t child_id = tree_.addChild(
         parent_id, midpoint, explorer_mission::kOpennessNotRated, false);
       if (child_id != std::numeric_limits<uint32_t>::max()) {

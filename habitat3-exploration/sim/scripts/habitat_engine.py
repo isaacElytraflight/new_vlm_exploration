@@ -5,6 +5,7 @@ Commands (one JSON object per line):
   {"cmd": "get_obs"}
   {"cmd": "get_pose"}
   {"cmd": "get_map"}
+  {"cmd": "get_floor_area"}
   {"cmd": "step", "action": "move_forward", "count": 1}
   {"cmd": "reset"}
   {"cmd": "shutdown"}
@@ -35,7 +36,7 @@ SENSOR_RANGE_M = float(os.environ.get("HABITAT_SENSOR_RANGE_M", "4.0"))
 
 SCENE = os.environ.get(
     "HABITAT_SCENE",
-    "/data/scene_datasets/habitat-test-scenes/skokloster-castle.glb",
+    "/data/scene_datasets/mp3d/JmbYfDe2QKZ/JmbYfDe2QKZ.glb",
 )
 SOCKET_PATH = os.environ.get("HABITAT_ENGINE_SOCKET", "/tmp/habitat_engine.sock")
 
@@ -202,6 +203,30 @@ class HabitatEngine:
         )
         return grid, MAP_METERS_PER_PIXEL, origin_x, origin_y
 
+    def get_floor_area(self) -> Tuple[float, float]:
+        """Return (mappable_area_m2, meters_per_pixel) from navmesh top-down.
+
+        Area = (navigable floor + adjacent wall cells) × mpp² so coverage GT
+        matches mapped free+occupied cells on /grid_map.
+        """
+        pf = self._sim.pathfinder
+        if not pf.is_loaded:
+            raise RuntimeError("pathfinder not loaded")
+        pos = self._sim.get_agent(0).get_state().position
+        height = float(pos[1])
+        top_down = pf.get_topdown_view(MAP_METERS_PER_PIXEL, height)
+        navigable = np.asarray(top_down, dtype=bool)
+        h, w = navigable.shape
+        dilated = np.zeros((h, w), dtype=bool)
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                r0, r1 = max(0, dr), h + min(0, dr)
+                c0, c1 = max(0, dc), w + min(0, dc)
+                dilated[r0:r1, c0:c1] |= navigable[r0 - dr : r1 - dr, c0 - dc : c1 - dc]
+        walls = dilated & (~navigable)
+        area = float(np.count_nonzero(navigable | walls)) * (MAP_METERS_PER_PIXEL ** 2)
+        return area, MAP_METERS_PER_PIXEL
+
 
 def _encode_obs_response(engine: HabitatEngine) -> Dict[str, Any]:
     rgb, depth, birdseye, collided = engine.get_obs()
@@ -250,6 +275,16 @@ def _handle_request(engine: HabitatEngine, payload: Dict[str, Any]) -> Dict[str,
             "resolution": resolution,
             "origin_x": origin_x,
             "origin_y": origin_y,
+        }
+    if cmd == "get_floor_area":
+        try:
+            area_m2, mpp = engine.get_floor_area()
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        return {
+            "ok": True,
+            "floor_area_m2": float(area_m2),
+            "meters_per_pixel": float(mpp),
         }
     if cmd == "step":
         action = payload.get("action", "")

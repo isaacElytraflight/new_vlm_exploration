@@ -98,6 +98,34 @@ def test_teleop_name_mapping_unknown_negative():
     assert "strafe" not in TELEOP_NAME_TO_ACTION
 
 
+def test_ipc_get_floor_area_positive():
+    payload = {"ok": True, "floor_area_m2": 12.5, "meters_per_pixel": 0.05}
+    client = HabitatIpcClient()
+    with patch.object(client, "_request", return_value=payload) as req:
+        area, mpp = client.get_floor_area()
+    req.assert_called_once_with({"cmd": "get_floor_area"})
+    assert area == 12.5
+    assert mpp == 0.05
+
+
+def test_ipc_get_floor_area_error_negative():
+    client = HabitatIpcClient()
+    with patch.object(
+        client,
+        "_request",
+        side_effect=HabitatIpcError("unknown cmd 'get_floor_area'"),
+    ):
+        with pytest.raises(HabitatIpcError, match="get_floor_area"):
+            client.get_floor_area()
+
+
+def test_mock_get_floor_area_positive():
+    driver = MockHabitatDriver()
+    area, mpp = driver.get_floor_area()
+    assert area > 0.0
+    assert mpp == 0.05
+
+
 def test_harness_negative_control():
     with pytest.raises(AssertionError):
         assert 1 == 2

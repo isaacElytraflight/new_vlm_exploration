@@ -6,6 +6,48 @@ Add a new dated section at the top when you work on this repo.
 
 ---
 
+## 2026-07-27 — Day closeout: scene selector, coverage graph, MP3D default, parenting fix
+
+Session landed backlog **#2** and **#3** from the 2026-07-22 closeout, fixed nearest-parent toggle behavior, switched default scene to Matterport **JmbYfDe2QKZ**, and documented per-device MP3D download (ToS-safe, not in git/image).
+
+### Landed
+
+| Item | What |
+|------|------|
+| **#3 Scene selector** | Elytra Project Actions dropdown; `GET/PUT /sim/habitat-scene`; `sim/data/selected_scene.path` → `start_sim.sh` exports `HABITAT_SCENE`; Stop+Start on change if episode running. |
+| **#2 Coverage vs distance** | `coverage_metrics_node` publishes JPEG chart on `/exploration/debug/coverage_vs_distance_img`; dashboard view in `project.yaml`. Metrics: odom path length vs **mapped area (free+occupied) / GT mappable (floor+walls)** via Habitat `get_floor_area` IPC. |
+| **Coverage monotonicity** | Numerator counts free **and** occupied (100); GT includes navmesh floor + adjacent walls so coverage does not drop when free cells become walls. |
+| **Chart labels** | X: “Distance traveled (m)”; Y: “Coverage (mapped / GT)” + tick values. |
+| **Default scene MP3D** | `JmbYfDe2QKZ` default in allowlist, `habitat_engine.py`, `selected_scene.path`, Elytra UI. |
+| **MP3D per-device download** | `sim/scripts/download_mp3d_habitat_scene.py` — HTTP Range extract of one house from `mp3d_habitat.zip` (~200 MB, not full 16 GB). README + `download_data.sh` reminder when `.glb` missing. |
+| **Nearest-parent OFF fix** | `FrontierTree::resolveFrontierParentId`: when toggle off, parent = current scan node only; batch “navigate to last-batch child” gated to ON only. Elytra re-applies exploration policy after Run Episode (retries until `/explore` up). |
+
+### Verify / ops
+
+- Elytra `npm test`: 45/45 (habitat scene + exploration policy harness).
+- Container pytest `test_coverage_metrics.py`: 20/20; gtest `test_frontier_tree`: 18/18.
+- MP3D assets live on **host** `sim/data/scene_datasets/mp3d/JmbYfDe2QKZ/` (gitignored), bind-mounted to `/data` — **not** in Docker image. New machine: run `download_mp3d_habitat_scene.py --i-agree-to-mp-tos` after Matterport access.
+- After C++ explore_node changes: in-container `colcon build --packages-select explorer_mission` then Stop → Run Episode.
+
+### Closed from 2026-07-22 backlog (do not re-queue)
+
+- **#2** Coverage vs distance dashboard panel.
+- **#3** Scene selector dropdown.
+- **#1** VLM mass-timeout verify — treated as done earlier session (not re-tested this session).
+
+### Next backlog (priority)
+
+1. **JmbYfDe2QKZ spawn floor** — Robot should **start on the bottom floor only** in this house (multi-floor MP3D; current spawn may be wrong level). Likely: Habitat agent start pose / navmesh height slice in `habitat_engine.py` or episode init.
+2. **VLM openness calibration** (#4) — scores cluster ~3–4.
+3. **Point-cloud mapping** (#5) — walls still weak on laser band alone.
+4. Secondary: mapper stamp deferrals, costmap TF noise, birdseye per scene, image rebuild after C++ (#9).
+
+### Explicitly not in repo (ToS)
+
+- Matterport mesh files under `sim/data/` — each developer downloads locally; see README “Matterport3D default scene”.
+
+---
+
 ## 2026-07-22 — Day closeout: next-session backlog
 
 Good stopping point after VLM queue/timeout soft-fail fixes. Container rebuilt with

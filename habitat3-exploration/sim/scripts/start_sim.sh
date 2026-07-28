@@ -9,6 +9,11 @@ bash /workspace/scripts/ensure_display.sh
 # Always clear prior episode processes (tmux children + orphaned ros2 run nodes).
 bash /workspace/scripts/cleanup_episode.sh
 
+# Habitat scene: prefer bind-mounted selection from Elytra (survives Connect).
+if [ -f /data/selected_scene.path ]; then
+  export HABITAT_SCENE="$(tr -d '\r\n' < /data/selected_scene.path)"
+fi
+
 LIVE_DIR=/tmp/habitat_live
 FRAME="$LIVE_DIR/frame.jpg"
 mkdir -p "$LIVE_DIR"

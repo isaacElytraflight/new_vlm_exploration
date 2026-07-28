@@ -112,3 +112,7 @@ views:
     label: Current Frontier (VLM)
     type: ros-compressed
     topic: /exploration/debug/current_frontier_img
+  - id: coverage-vs-distance
+    label: Coverage vs Distance
+    type: ros-compressed
+    topic: /exploration/debug/coverage_vs_distance_img

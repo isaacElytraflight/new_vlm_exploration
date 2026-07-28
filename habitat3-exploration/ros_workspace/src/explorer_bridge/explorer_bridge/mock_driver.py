@@ -89,6 +89,12 @@ class MockHabitatDriver:
         grid[:, -1] = 100
         return MapData(grid=grid, resolution=0.05, origin_x=0.0, origin_y=0.0)
 
+    def get_floor_area(self) -> tuple[float, float]:
+        if not self._alive:
+            raise RuntimeError("mock engine is dead")
+        # 8x8 free interior of the 10x10 mock map at 0.05 m/px
+        return 64 * (0.05 ** 2), 0.05
+
     def reset(self) -> None:
         self._collided = False
         self._step_count = 0

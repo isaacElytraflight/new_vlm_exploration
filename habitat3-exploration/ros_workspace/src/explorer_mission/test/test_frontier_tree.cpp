@@ -149,6 +149,47 @@ TEST(FrontierTree, FindNearestNode_ignoresSameBatchSiblings_negative)
   EXPECT_NE(*nearest, 1u);
 }
 
+TEST(FrontierTree, ResolveParent_nearestOffUsesCurrent_positive)
+{
+  explorer_mission::FrontierTree tree;
+  tree.createRoot(cv::Point2f(0.0f, 0.0f));
+  const uint32_t near = tree.addChild(0, cv::Point2f(5.0f, 0.0f), 2, false);
+  tree.setCurrentNodeId(0);
+  const std::vector<uint32_t> pool = tree.allNodeIds();
+  // Frontier sits next to `near`, but nearest-parent is OFF → must stay under current (0).
+  const uint32_t parent = tree.resolveFrontierParentId(
+    false, 0u, cv::Point2f(5.1f, 0.0f), &pool);
+  EXPECT_EQ(parent, 0u);
+  EXPECT_NE(parent, near);
+}
+
+TEST(FrontierTree, ResolveParent_nearestOnUsesSpatialNearest_positive)
+{
+  explorer_mission::FrontierTree tree;
+  tree.createRoot(cv::Point2f(0.0f, 0.0f));
+  const uint32_t near = tree.addChild(0, cv::Point2f(5.0f, 0.0f), 2, false);
+  tree.setCurrentNodeId(0);
+  const std::vector<uint32_t> pool = tree.allNodeIds();
+  const uint32_t parent = tree.resolveFrontierParentId(
+    true, 0u, cv::Point2f(5.1f, 0.0f), &pool);
+  EXPECT_EQ(parent, near);
+}
+
+TEST(FrontierTree, ResolveParent_nearestOffIgnoresCloserForeignNode_negative)
+{
+  explorer_mission::FrontierTree tree;
+  tree.createRoot(cv::Point2f(0.0f, 0.0f));
+  tree.addChild(0, cv::Point2f(1.0f, 0.0f), 2, false);
+  const uint32_t current = tree.addChild(0, cv::Point2f(10.0f, 0.0f), 2, false);
+  tree.setCurrentNodeId(current);
+  const std::vector<uint32_t> pool = tree.allNodeIds();
+  // Closer tree node exists, but OFF mode must not reparent away from current.
+  const uint32_t parent = tree.resolveFrontierParentId(
+    false, current, cv::Point2f(1.1f, 0.0f), &pool);
+  EXPECT_EQ(parent, current);
+  EXPECT_NE(parent, 1u);
+}
+
 TEST(FrontierTree, SelectBestAmong_positive)
 {
   explorer_mission::FrontierTree tree;

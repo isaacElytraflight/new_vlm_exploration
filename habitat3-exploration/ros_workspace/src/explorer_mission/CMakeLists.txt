@@ -101,6 +101,11 @@ install(PROGRAMS
   DESTINATION lib/${PROJECT_NAME}
   RENAME current_frontier_view_node)
 
+install(PROGRAMS
+  explorer_mission/coverage_metrics_node.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME coverage_metrics_node)
+
 install(DIRECTORY include/
   DESTINATION include)
 

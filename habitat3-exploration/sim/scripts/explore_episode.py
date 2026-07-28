@@ -14,7 +14,7 @@ import habitat_sim
 
 SCENE = os.environ.get(
     "HABITAT_SCENE",
-    "/data/scene_datasets/habitat-test-scenes/skokloster-castle.glb",
+    "/data/scene_datasets/mp3d/JmbYfDe2QKZ/JmbYfDe2QKZ.glb",
 )
 LIVE_DIR = "/tmp/habitat_live"
 # JPEG encodes much faster than PNG — important when updating every frame.

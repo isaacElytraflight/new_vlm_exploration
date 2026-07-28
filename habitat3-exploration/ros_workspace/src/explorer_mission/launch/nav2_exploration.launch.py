@@ -141,4 +141,16 @@ def generate_launch_description() -> LaunchDescription:
             }],
             output="screen",
         ),
+
+        Node(
+            package="explorer_mission",
+            executable="coverage_metrics_node",
+            name="coverage_metrics",
+            parameters=[{
+                "odom_topic": "/odom",
+                "grid_topic": "/grid_map",
+                "image_topic": "/exploration/debug/coverage_vs_distance_img",
+            }],
+            output="screen",
+        ),
     ])

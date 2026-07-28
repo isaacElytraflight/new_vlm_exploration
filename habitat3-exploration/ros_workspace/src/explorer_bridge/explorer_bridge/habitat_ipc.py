@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import socket
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 import numpy as np
 
@@ -122,6 +122,11 @@ class HabitatIpcClient:
             origin_x=float(data["origin_x"]),
             origin_y=float(data["origin_y"]),
         )
+
+    def get_floor_area(self) -> Tuple[float, float]:
+        """Return (floor_area_m2, meters_per_pixel) from habitat engine GT navmesh."""
+        data = self._request({"cmd": "get_floor_area"})
+        return float(data["floor_area_m2"]), float(data.get("meters_per_pixel", 0.0))
 
     def shutdown(self) -> None:
         try:

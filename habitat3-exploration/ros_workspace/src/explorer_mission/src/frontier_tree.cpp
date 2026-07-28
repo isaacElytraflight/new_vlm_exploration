@@ -219,6 +219,22 @@ std::optional<uint32_t> FrontierTree::findNearestNode(
   return best->id;
 }
 
+uint32_t FrontierTree::resolveFrontierParentId(
+  bool parent_to_nearest,
+  uint32_t current_node_id,
+  const cv::Point2f & frontier_midpoint,
+  const std::vector<uint32_t> * parent_pool) const
+{
+  if (!parent_to_nearest) {
+    return current_node_id;
+  }
+  const auto nearest = findNearestNode(frontier_midpoint, parent_pool);
+  if (nearest.has_value()) {
+    return *nearest;
+  }
+  return current_node_id;
+}
+
 std::vector<uint32_t> FrontierTree::allNodeIds() const
 {
   std::vector<uint32_t> ids;
