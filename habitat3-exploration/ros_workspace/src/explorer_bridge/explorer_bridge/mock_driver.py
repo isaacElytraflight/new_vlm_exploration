@@ -95,6 +95,13 @@ class MockHabitatDriver:
         # 8x8 free interior of the 10x10 mock map at 0.05 m/px
         return 64 * (0.05 ** 2), 0.05
 
+    def get_coverage_stats(self) -> tuple[float, float, float]:
+        if not self._alive:
+            raise RuntimeError("mock engine is dead")
+        gt_m2, mpp = self.get_floor_area()
+        # Mock: half the GT is "explored".
+        return 0.5 * gt_m2, gt_m2, mpp
+
     def reset(self) -> None:
         self._collided = False
         self._step_count = 0

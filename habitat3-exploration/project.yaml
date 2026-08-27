@@ -116,3 +116,7 @@ views:
     label: Coverage vs Distance
     type: ros-compressed
     topic: /exploration/debug/coverage_vs_distance_img
+  - id: exploration-status
+    label: Exploration Status
+    type: ros-compressed
+    topic: /exploration/debug/status_img

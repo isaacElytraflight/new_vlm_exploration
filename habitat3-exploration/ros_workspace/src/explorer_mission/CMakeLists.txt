@@ -106,6 +106,11 @@ install(PROGRAMS
   DESTINATION lib/${PROJECT_NAME}
   RENAME coverage_metrics_node)
 
+install(PROGRAMS
+  explorer_mission/exploration_status_hud_node.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME exploration_status_hud_node)
+
 install(DIRECTORY include/
   DESTINATION include)
 

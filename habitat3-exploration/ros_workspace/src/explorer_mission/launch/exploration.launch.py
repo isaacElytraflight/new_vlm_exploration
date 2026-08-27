@@ -110,6 +110,12 @@ def generate_launch_description() -> LaunchDescription:
         ),
         Node(
             package="explorer_mission",
+            executable="exploration_status_hud_node",
+            name="exploration_status_hud",
+            output="screen",
+        ),
+        Node(
+            package="explorer_mission",
             executable="vlm_node",
             name="vlm_server",
             output="screen",

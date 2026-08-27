@@ -37,6 +37,10 @@ LIFECYCLE_NODES = [
 
 def generate_launch_description() -> LaunchDescription:
     bringup_dir = get_package_share_directory("nav2_bringup")
+    explorer_share = get_package_share_directory("explorer_mission")
+    default_bt_xml = os.path.join(
+        explorer_share, "config", "navigate_to_pose_no_recovery.xml"
+    )
 
     namespace = LaunchConfiguration("namespace")
     use_sim_time = LaunchConfiguration("use_sim_time")
@@ -45,6 +49,7 @@ def generate_launch_description() -> LaunchDescription:
     use_composition = LaunchConfiguration("use_composition")
     use_respawn = LaunchConfiguration("use_respawn")
     log_level = LaunchConfiguration("log_level")
+    default_nav_to_pose_bt_xml = LaunchConfiguration("default_nav_to_pose_bt_xml")
 
     remappings = [("/tf", "tf"), ("/tf_static", "tf_static")]
 
@@ -52,7 +57,10 @@ def generate_launch_description() -> LaunchDescription:
         RewrittenYaml(
             source_file=params_file,
             root_key=namespace,
-            param_rewrites={"autostart": autostart},
+            param_rewrites={
+                "autostart": autostart,
+                "default_nav_to_pose_bt_xml": default_nav_to_pose_bt_xml,
+            },
             convert_types=True,
         ),
         allow_substs=True,
@@ -191,5 +199,9 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("use_composition", default_value="False"),
         DeclareLaunchArgument("use_respawn", default_value="False"),
         DeclareLaunchArgument("log_level", default_value="info"),
+        DeclareLaunchArgument(
+            "default_nav_to_pose_bt_xml",
+            default_value=default_bt_xml,
+        ),
         load_nodes,
     ])

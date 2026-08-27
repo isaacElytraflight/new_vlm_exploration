@@ -25,6 +25,7 @@ setup(
             "depth_camera_info_node = explorer_bridge.depth_camera_info_node:main",
             "depth_to_laserscan_node = explorer_bridge.depth_to_laserscan_node:main",
             "known_pose_mapper_node = explorer_bridge.known_pose_mapper_node:main",
+            "known_pose_pc_mapper_node = explorer_bridge.known_pose_pc_mapper_node:main",
             "cmd_vel_to_discrete_node = explorer_bridge.cmd_vel_to_discrete_node:main",
         ],
     },

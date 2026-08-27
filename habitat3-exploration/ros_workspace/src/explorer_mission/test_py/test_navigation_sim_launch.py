@@ -44,3 +44,14 @@ def test_parent_uses_sim_navigation_launch_positive():
     text = PARENT_LAUNCH.read_text(encoding="utf-8")
     assert "navigation_sim.launch.py" in text
     assert "navigation_launch.py" not in text
+
+
+def test_sim_launch_wires_no_recovery_bt_positive():
+    text = SIM_LAUNCH.read_text(encoding="utf-8")
+    assert "navigate_to_pose_no_recovery.xml" in text
+    assert "default_nav_to_pose_bt_xml" in text
+
+
+def test_sim_launch_does_not_use_stock_recovery_bt_negative():
+    text = SIM_LAUNCH.read_text(encoding="utf-8")
+    assert "navigate_to_pose_w_replanning_and_recovery.xml" not in text

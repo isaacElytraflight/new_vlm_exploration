@@ -6,6 +6,7 @@ Commands (one JSON object per line):
   {"cmd": "get_pose"}
   {"cmd": "get_map"}
   {"cmd": "get_floor_area"}
+  {"cmd": "get_coverage_stats"}
   {"cmd": "step", "action": "move_forward", "count": 1}
   {"cmd": "reset"}
   {"cmd": "shutdown"}
@@ -282,7 +283,7 @@ class HabitatEngine:
         """Return (mappable_area_m2, meters_per_pixel) from navmesh top-down.
 
         Area = (navigable floor + adjacent wall cells) × mpp² so coverage GT
-        matches mapped free+occupied cells on /grid_map.
+        matches Habitat revealed free+occupied cells (not laser /grid_map).
         """
         pf = self._sim.pathfinder
         if not pf.is_loaded:
@@ -301,6 +302,18 @@ class HabitatEngine:
         walls = dilated & (~navigable)
         area = float(np.count_nonzero(navigable | walls)) * (MAP_METERS_PER_PIXEL ** 2)
         return area, MAP_METERS_PER_PIXEL
+
+    def get_coverage_stats(self) -> Tuple[float, float, float]:
+        """Return (explored_m2, gt_m2, mpp) on the same navmesh top-down slice.
+
+        Explored area comes from the privileged reveal map (free+walls), so it
+        cannot exceed GT. Laser /grid_map free+occupied can — and did — overshoot
+        GT and clamp the coverage chart at 1.0 while frontiers remained.
+        """
+        grid, mpp, _ox, _oy = self.get_map()
+        explored = float(np.count_nonzero((grid == 0) | (grid == 100))) * (mpp * mpp)
+        gt_m2, _ = self.get_floor_area()
+        return explored, float(gt_m2), float(mpp)
 
 
 def _encode_obs_response(engine: HabitatEngine) -> Dict[str, Any]:
@@ -359,6 +372,17 @@ def _handle_request(engine: HabitatEngine, payload: Dict[str, Any]) -> Dict[str,
         return {
             "ok": True,
             "floor_area_m2": float(area_m2),
+            "meters_per_pixel": float(mpp),
+        }
+    if cmd == "get_coverage_stats":
+        try:
+            explored_m2, gt_m2, mpp = engine.get_coverage_stats()
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        return {
+            "ok": True,
+            "explored_m2": float(explored_m2),
+            "gt_m2": float(gt_m2),
             "meters_per_pixel": float(mpp),
         }
     if cmd == "step":

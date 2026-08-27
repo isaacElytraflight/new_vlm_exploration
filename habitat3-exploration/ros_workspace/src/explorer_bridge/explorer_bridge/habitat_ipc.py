@@ -128,6 +128,15 @@ class HabitatIpcClient:
         data = self._request({"cmd": "get_floor_area"})
         return float(data["floor_area_m2"]), float(data.get("meters_per_pixel", 0.0))
 
+    def get_coverage_stats(self) -> Tuple[float, float, float]:
+        """Return (explored_m2, gt_m2, meters_per_pixel) from Habitat reveal vs GT."""
+        data = self._request({"cmd": "get_coverage_stats"})
+        return (
+            float(data["explored_m2"]),
+            float(data["gt_m2"]),
+            float(data.get("meters_per_pixel", 0.0)),
+        )
+
     def shutdown(self) -> None:
         try:
             self._request({"cmd": "shutdown"})

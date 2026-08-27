@@ -6,6 +6,149 @@ Add a new dated section at the top when you work on this repo.
 
 ---
 
+## 2026-08-26/27 — Session closeout: Goal A PC map + Nav2 fail-fast + open issues
+
+### Shipped this session
+
+1. **Goal A (A1) — point-cloud → `/grid_map`**
+   - `known_pose_pc_mapper_node` + `pc_to_occupancy` / `depth_projection`
+   - Wall band **z ∈ [0.05, 1.0] m**; floor/ceiling/tall hits carve free only
+   - Launch default `use_pc_mapper:=true` (rollback `:=false`)
+   - **FREE never overwrites OCCUPIED** (near wall + far wall / table underside)
+
+2. **Exploration Status HUD** — Elytra view `/exploration/debug/status_img`; reconnect Elytra after `project.yaml` view changes (Stop/Run episode alone does **not** reload views)
+
+3. **Nav2 fail-fast** — `navigate_to_pose_no_recovery.xml` (no Spin/Wait/BackUp); planner `tolerance` **1.0** m; explore already `markFullyExplored` on nav fail
+
+4. Earlier in the day (same working tree): Habitat **privileged coverage** IPC for coverage chart (not laser `/grid_map` area)
+
+### Important lessons learned
+
+| Lesson | Detail |
+|--------|--------|
+| Laser band ≠ map authority | Thin upper-third laser was the wrong primary mapper; full FOV + height band is correct for walls without floor phantoms |
+| 2D ray order matters | Farther PC ray used to paint FREE through nearer OCC; sticky occupied is the right 2D policy |
+| Pirouette ≠ always SM | HUD: `scanning`+`rotate_360` = explore; `navigating`+spin = Nav2 recovery (stock BT) |
+| Plan fail root cause | Navfn `allow_unknown:false` + frontier midpoints on free↔unknown → `Failed to create plan`; recovery thrash was a *symptom* |
+| Fail-fast side effect | Killing recovery lets explore mark many frontiers dead **from a bad pose** before returning to a sane parent — see open issue below |
+| Elytra views | `project.yaml` views load on **Connect**, not on Run Episode |
+| Stop Episode spam | Python nodes double-`rclpy.shutdown()` → `rcl_shutdown already called` exit 1 noise (cosmetic; fix later) |
+| PC mapper stamps | Frequent `No /odom with exact depth stamp` defers frames → free carve lags → worsens plan connectivity |
+
+### OPEN — cascade frontier exhaustion (fix next session)
+
+**Symptom:** After no-recovery BT, if the robot is in a pose where *many* frontiers are currently unplannable (trapped pocket, incomplete free corridor, stamp-lagged map), explore marks child after child `fully_explored` back-to-back and wipes a batch of still-valid frontiers.
+
+**Why (current code):** On nav fail we `markFullyExplored(child)` then *attempt* `navigateToPosition(current)` (return to scan node). With fail-fast BT, that return can also fail immediately; loop `continue`s and `selectNextChild` from the **same bad pose**, exhausting siblings.
+
+**Working idea (user + agree):** Treat plan-fail as “this frontier is dead *from here*” but **require a successful return to the parent/scan node before selecting another frontier**. That return is the useful recovery (moves somewhere known), without Spin/BackUp thrash into walls.
+
+**Sketch for next session:**
+
+1. On NavigateToPose fail to child: mark **only that** child exhausted.
+2. **Block** further child selection until return-to-parent succeeds (retry return; optional soft recovery BT *only* for return-home, or discrete backtrack).
+3. Only after pose ≈ parent: run detect/select again (map may have improved).
+4. Guardrails: max consecutive plan-fails before forcing a 360 scan / map refresh; never mark *unattempted* siblings dead.
+
+**Alternatives considered:** snap goals into free space; temporary `allow_unknown` corridor; re-enable limited recovery only when planner recovery would help — still secondary to “home first.”
+
+### Ops at closeout
+
+- Commit + push this session’s work
+- `docker compose … down` + stop Elytra `npm run dev`
+
+---
+
+## 2026-08-26 — Goal A v1: point-cloud occupancy mapper (height band 0–1 m)
+
+
+### What shipped
+- **`known_pose_pc_mapper_node`**: full-depth FOV → `/grid_map` (replaces laser mapper when `use_pc_mapper:=true`, default).
+- **Wall band**: mark OCCUPIED only for hits with base/map **z ∈ [0.05, 1.0] m** (above floor, at/below robot height). Floor, ceiling, and tall clutter above 1 m carve free space but do not paint phantom walls.
+- **`/scan`** kept for Nav2 local obstacles; mapping authority is the PC path.
+- Pure-Python tests: `test_pc_to_occupancy.py` (10/10 green with `--noconftest` on host).
+
+### Key files
+- `depth_projection.py`, `pc_to_occupancy.py`, `known_pose_pc_mapper_node.py`
+- Launch: `nav2_exploration.launch.py` — `use_pc_mapper` feature flag (rollback: `false` → old `known_pose_mapper`).
+
+### Verify
+```bash
+cd habitat3-exploration/ros_workspace/src/explorer_bridge
+PYTHONPATH="test:." python -m pytest test/test_pc_to_occupancy.py -q --noconftest
+```
+In container: rebuild `explorer_bridge`, run episode, inspect Grid Map view for wall quality vs floor phantoms.
+
+---
+
+## 2026-08-26 — Exploration Status HUD (spin-loop diagnosis)
+
+### Why
+In-place 360° loops can be either `explore_node` `rotate_360` (scan after moving >0.5 m) or Nav2 recovery while `navigating`. Need a live phase view, not just logs.
+
+### What
+- Elytra view **Exploration Status** ← `/exploration/debug/status_img`
+- `explore_node` now publishes `rotate_360 first scan` / `rotate_360 (moved >0.5 m)` / `rotate_360 done` on `/exploration/status`
+
+### How to read
+- Phase **SCANNING** + detail `rotate_360 …` while spinning → state machine
+- Phase **NAVIGATING** / **BACKTRACKING** while spinning → Nav2 path/recovery
+
+---
+
+## 2026-08-26 — Nav2: fail-fast on plan miss (no recovery thrash)
+
+### Symptom
+Unreachable frontiers → `Failed to create plan` → Spin/Wait/BackUp loop for ~20s; path frozen; robot pirouettes / backs into walls.
+
+### Fix
+- BT: `config/navigate_to_pose_no_recovery.xml` (no Spin/BackUp/Wait/RecoveryNode); wired via `default_nav_to_pose_bt_xml`
+- Planner `tolerance` 0.5 → **1.0** m
+- Explore already `markFullyExplored` on NavigateToPose failure — now returns quickly so the next frontier is tried
+
+### Ops
+Stop → Run Episode (rebuilds explore_node + reloads Nav2 params/BT).
+
+### Follow-up
+See session closeout **OPEN — cascade frontier exhaustion**.
+
+---
+
+## 2026-08-26 — PC mapper: FREE must not erase nearer OCCUPIED
+
+### Symptom
+A farther 2D ray (far wall, or horizon free-carve) painted FREE through a nearer wall-band hit, so tables / near walls disappeared when anything behind them was integrated later.
+
+### Fix
+Mark all wall-band endpoints OCCUPIED first, then carve FREE only into cells that are not already occupied.
+
+### Verify
+`PYTHONPATH="test:." python -m pytest test/test_pc_to_occupancy.py -q --noconftest`
+
+---
+
+## 2026-08-16 — Coverage chart false 1.00 (laser vs navmesh GT)
+
+### Symptom
+Coverage-vs-distance capped at **1.00** while frontiers / new area kept growing.
+
+### Root cause
+Live snapshot: `mapped≈146 m²` from laser `/grid_map` (free+occ) vs Habitat navmesh GT `≈84 m²`. Ratio clamped to 1. Max navmesh GT (all floors OR’d) is still only `≈95 m²` — laser free alone was `≈105 m²` (inflation, non-navmesh free, stair-void bleed). **Not** a small GT arithmetic bug; numerator and denominator were different maps.
+
+### Fix
+- Habitat IPC `get_coverage_stats` → explored free+walls on privileged reveal map + same-slice GT.
+- `coverage_metrics_node` uses that pair (odom still for distance); stop using `/grid_map` for coverage area.
+- Rebuild `explorer_mission` + `explorer_bridge` (install copies node script).
+
+### Verify
+- pytest coverage + IPC: 35/35
+- Offline engine: explored 23.9 / GT 84.1 → ratio 0.285 (≤1); grows with motion.
+
+### Ops
+Stop → Run Episode so habitat_engine loads new IPC and coverage node restarts.
+
+---
+
 ## 2026-08-16 — Ground-floor spawn + no stairs (JmbYfDe2QKZ)
 
 ### Symptom

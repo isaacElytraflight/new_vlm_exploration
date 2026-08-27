@@ -28,6 +28,9 @@ class HabitatDriver:
     def get_floor_area(self) -> tuple[float, float]:
         return self._client.get_floor_area()
 
+    def get_coverage_stats(self) -> tuple[float, float, float]:
+        return self._client.get_coverage_stats()
+
     def reset(self) -> None:
         self._client.reset()
 

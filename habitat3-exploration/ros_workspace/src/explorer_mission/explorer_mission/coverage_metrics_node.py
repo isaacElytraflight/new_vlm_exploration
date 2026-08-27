@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""Publish coverage-vs-distance JPEG chart from /odom + /grid_map + Habitat GT."""
+"""Publish coverage-vs-distance JPEG chart from /odom + Habitat reveal/GT.
+
+Coverage uses Habitat privileged explored area vs navmesh GT (same top-down
+slice). Laser /grid_map free+occupied routinely exceeds that GT (inflation,
+non-navmesh free, multi-floor bleed through stair voids) and clamped the chart
+at 1.0 while exploration continued.
+"""
 
 from __future__ import annotations
 
 from typing import Optional, Tuple
 
-import numpy as np
 import rclpy
-from nav_msgs.msg import OccupancyGrid, Odometry
+from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import Float32MultiArray
@@ -17,7 +22,6 @@ from explorer_mission.coverage_metrics import (
     CoverageSampleRing,
     coverage_ratio,
     integrate_path_meters,
-    mapped_area_m2,
     render_coverage_chart_jpeg,
 )
 
@@ -26,7 +30,6 @@ class CoverageMetricsNode(Node):
     def __init__(self) -> None:
         super().__init__("coverage_metrics")
         self.declare_parameter("odom_topic", "/odom")
-        self.declare_parameter("grid_topic", "/grid_map")
         self.declare_parameter("image_topic", "/exploration/debug/coverage_vs_distance_img")
         self.declare_parameter("socket_path", DEFAULT_SOCKET_PATH)
         self.declare_parameter("gt_floor_area_m2", -1.0)  # <0 → fetch via IPC
@@ -36,7 +39,6 @@ class CoverageMetricsNode(Node):
         self.declare_parameter("chart_height", 360)
 
         odom_topic = str(self.get_parameter("odom_topic").value)
-        grid_topic = str(self.get_parameter("grid_topic").value)
         image_topic = str(self.get_parameter("image_topic").value)
         self._socket_path = str(self.get_parameter("socket_path").value)
         gt_param = float(self.get_parameter("gt_floor_area_m2").value)
@@ -49,7 +51,8 @@ class CoverageMetricsNode(Node):
         self._prev_xy: Optional[Tuple[float, float]] = None
         self._mapped_m2 = 0.0
         self._gt_m2 = gt_param if gt_param > 0.0 else 0.0
-        self._gt_fetched = gt_param > 0.0
+        self._gt_from_param = gt_param > 0.0
+        self._stats_ok = False
         self._ring = CoverageSampleRing(maxlen=max(1, maxlen))
 
         self._img_pub = self.create_publisher(CompressedImage, image_topic, 1)
@@ -57,28 +60,27 @@ class CoverageMetricsNode(Node):
             Float32MultiArray, "exploration/debug/coverage_snapshot", 1
         )
         self.create_subscription(Odometry, odom_topic, self._odom_cb, 10)
-        self.create_subscription(OccupancyGrid, grid_topic, self._grid_cb, 1)
         period = 1.0 / publish_hz if publish_hz > 0.0 else 0.5
         self.create_timer(period, self._tick)
-        self.create_timer(1.0, self._try_fetch_gt)
 
         self.get_logger().info(
-            f"Coverage metrics → {image_topic} (gt={'param' if self._gt_fetched else 'pending IPC'})"
+            f"Coverage metrics → {image_topic} "
+            f"(Habitat reveal/GT; gt={'param' if self._gt_from_param else 'IPC'})"
         )
 
-    def _try_fetch_gt(self) -> None:
-        if self._gt_fetched:
-            return
+    def _refresh_habitat_stats(self) -> bool:
         try:
-            area, _mpp = HabitatIpcClient(self._socket_path).get_floor_area()
+            explored, gt, _mpp = HabitatIpcClient(self._socket_path).get_coverage_stats()
         except HabitatIpcError as exc:
             self.get_logger().warn(
-                f"get_floor_area IPC failed: {exc}", throttle_duration_sec=10.0
+                f"get_coverage_stats IPC failed: {exc}", throttle_duration_sec=10.0
             )
-            return
-        self._gt_m2 = float(area)
-        self._gt_fetched = True
-        self.get_logger().info(f"GT mappable area (floor+walls) = {self._gt_m2:.2f} m²")
+            return False
+        self._mapped_m2 = float(explored)
+        if not self._gt_from_param:
+            self._gt_m2 = float(gt)
+        self._stats_ok = True
+        return True
 
     def _odom_cb(self, msg: Odometry) -> None:
         x = float(msg.pose.pose.position.x)
@@ -87,16 +89,8 @@ class CoverageMetricsNode(Node):
             self._meters, self._prev_xy, x, y
         )
 
-    def _grid_cb(self, msg: OccupancyGrid) -> None:
-        w = int(msg.info.width)
-        h = int(msg.info.height)
-        if w <= 0 or h <= 0 or len(msg.data) < w * h:
-            return
-        grid = np.asarray(msg.data[: w * h], dtype=np.int8).reshape((h, w))
-        res = float(msg.info.resolution)
-        self._mapped_m2 = mapped_area_m2(grid, res)
-
     def _tick(self) -> None:
+        self._refresh_habitat_stats()
         cov = coverage_ratio(self._mapped_m2, self._gt_m2)
         self._ring.append(self._meters, cov)
         xs, ys = self._ring.as_series()

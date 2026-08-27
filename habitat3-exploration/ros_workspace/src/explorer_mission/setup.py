@@ -24,6 +24,7 @@ setup(
             "maprender_node = explorer_mission.maprender_node:main",
             "current_frontier_view_node = explorer_mission.current_frontier_view_node:main",
             "coverage_metrics_node = explorer_mission.coverage_metrics_node:main",
+            "exploration_status_hud_node = explorer_mission.exploration_status_hud_node:main",
         ],
     },
 )

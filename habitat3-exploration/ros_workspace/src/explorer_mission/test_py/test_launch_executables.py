@@ -31,10 +31,21 @@ def test_coverage_metrics_installed_in_cmake_positive():
     assert "RENAME coverage_metrics_node" in text
 
 
+def test_exploration_status_hud_installed_in_cmake_positive():
+    text = CMAKE.read_text(encoding="utf-8")
+    assert "exploration_status_hud_node.py" in text
+    assert "RENAME exploration_status_hud_node" in text
+
+
 def test_launch_references_installed_python_nodes_positive():
     launch = LAUNCH.read_text(encoding="utf-8")
     cmake = CMAKE.read_text(encoding="utf-8")
-    for exe in ("maprender_node", "vlm_node", "current_frontier_view_node"):
+    for exe in (
+        "maprender_node",
+        "vlm_node",
+        "current_frontier_view_node",
+        "exploration_status_hud_node",
+    ):
         assert f'executable="{exe}"' in launch
         assert f"RENAME {exe}" in cmake
 
@@ -53,3 +64,4 @@ def test_missing_rename_would_break_launch_negative():
     assert "install(PROGRAMS" in cmake
     assert "current_frontier_view_node.py" in cmake
     assert "coverage_metrics_node.py" in cmake
+    assert "exploration_status_hud_node.py" in cmake

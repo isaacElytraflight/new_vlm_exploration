@@ -96,6 +96,48 @@ def test_allow_unknown_true_rejected_negative():
     assert params["GridBased"]["allow_unknown"] is not True
 
 
+def test_planner_goal_tolerance_one_meter_positive():
+    """Larger endpoint slack so frontier midpoints near free cells can still plan."""
+    params = _planner_params()
+    assert params["GridBased"]["tolerance"] == pytest.approx(1.0)
+
+
+def test_planner_goal_tolerance_not_half_meter_negative():
+    """Regression: 0.5 m was too tight for free↔unknown frontier midpoints."""
+    params = _planner_params()
+    assert params["GridBased"]["tolerance"] > 0.5
+
+
+def _bt_navigator_params():
+    with PARAMS.open(encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    return data["bt_navigator"]["ros__parameters"]
+
+
+def test_nav_to_pose_bt_param_declared_positive():
+    params = _bt_navigator_params()
+    assert "default_nav_to_pose_bt_xml" in params
+
+
+def test_no_recovery_bt_xml_has_no_spin_backup_positive():
+    bt = PARAMS.parent / "navigate_to_pose_no_recovery.xml"
+    text = bt.read_text(encoding="utf-8")
+    assert "ComputePathToPose" in text
+    assert "FollowPath" in text
+    assert "<Spin" not in text
+    assert "<BackUp" not in text
+    assert "<Wait" not in text
+    assert "RecoveryNode" not in text
+
+
+def test_no_recovery_bt_xml_rejects_stock_recovery_negative():
+    """Stock navigate_to_pose_w_replanning_and_recovery must not be our BT."""
+    bt = PARAMS.parent / "navigate_to_pose_no_recovery.xml"
+    text = bt.read_text(encoding="utf-8")
+    assert "NavigateRecovery" not in text
+    assert 'spin_dist="1.57"' not in text
+
+
 def test_harness_negative_control():
     with pytest.raises(AssertionError):
         assert 1 == 2

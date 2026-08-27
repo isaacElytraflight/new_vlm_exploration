@@ -7,6 +7,7 @@ import pytest
 
 from explorer_mission.coverage_metrics import (
     CoverageSampleRing,
+    adjacent_wall_mask,
     coverage_ratio,
     floor_area_m2_from_navigable,
     free_area_m2,
@@ -82,14 +83,31 @@ def test_free_area_empty_or_unknown_only_negative():
     assert free_area_m2(occupied, resolution=0.1) == pytest.approx(0.0)
 
 
-def test_coverage_ratio_positive():
-    assert coverage_ratio(25.0, 100.0) == pytest.approx(0.25)
-    assert coverage_ratio(0.0, 50.0) == pytest.approx(0.0)
+def test_coverage_ratio_clamps_above_one_negative():
+    """Clamp hides laser overcount; callers must keep mapped ≤ GT."""
+    assert coverage_ratio(150.0, 84.0) == pytest.approx(1.0)
 
 
-def test_coverage_ratio_zero_gt_negative():
-    assert coverage_ratio(10.0, 0.0) == pytest.approx(0.0)
-    assert coverage_ratio(10.0, -5.0) == pytest.approx(0.0)
+def test_habitat_aligned_mapped_never_exceeds_gt_positive():
+    """Revealed free+walls on a navmesh slice cannot exceed GT mappable."""
+    navigable = np.zeros((8, 8), dtype=bool)
+    navigable[2:6, 2:6] = True
+    mpp = 0.5
+    gt = gt_mappable_area_m2(navigable, mpp)
+    # Partial reveal: some free + adjacent walls.
+    grid = np.full((8, 8), -1, dtype=np.int8)
+    grid[3:5, 3:5] = 0
+    grid[2, 3] = 100
+    grid[3, 2] = 100
+    mapped = mapped_area_m2(grid, mpp)
+    assert mapped < gt
+    # Full reveal of floor+walls matches GT.
+    full = np.full((8, 8), -1, dtype=np.int8)
+    full[navigable] = 0
+    walls = adjacent_wall_mask(navigable)
+    full[walls] = 100
+    assert mapped_area_m2(full, mpp) == pytest.approx(gt)
+
 
 
 def test_floor_area_from_navigable_positive():

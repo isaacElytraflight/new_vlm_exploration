@@ -300,7 +300,7 @@ public:
         publishTree();
         publishPhase(
           "backtracking", current->id, current->id, false,
-          "nav failed; returning to parent scan node");
+          "nav/plan failed; frontier dead — return to scan node");
         if (!navigateToPosition(current->position, current->position)) {
           RCLCPP_WARN(get_logger(), "Return to parent after nav failure also failed.");
         }
@@ -649,6 +649,11 @@ private:
       return;
     }
 
+    const char * scan_why = (counter_ == 0)
+      ? "rotate_360 first scan"
+      : "rotate_360 (moved >0.5 m)";
+    publishPhase("scanning", tree_.currentNodeId(), 0, false, scan_why);
+
     auto goal = Rotate360::Goal();
     auto future = rotate_client_->async_send_goal(goal);
     if (future.wait_for(std::chrono::seconds(120)) != std::future_status::ready) {
@@ -680,6 +685,7 @@ private:
     }
     last_scan_position_ = current_pos_;
     ++counter_;
+    publishPhase("scanning", tree_.currentNodeId(), 0, false, "rotate_360 done");
   }
 
   bool navigateToPosition(const cv::Point2f & goal_pos, const cv::Point2f & look_at)

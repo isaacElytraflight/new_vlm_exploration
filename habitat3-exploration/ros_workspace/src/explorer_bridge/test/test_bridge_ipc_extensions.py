@@ -126,6 +126,40 @@ def test_mock_get_floor_area_positive():
     assert mpp == 0.05
 
 
+def test_ipc_get_coverage_stats_positive():
+    payload = {
+        "ok": True,
+        "explored_m2": 4.0,
+        "gt_m2": 12.5,
+        "meters_per_pixel": 0.05,
+    }
+    client = HabitatIpcClient()
+    with patch.object(client, "_request", return_value=payload) as req:
+        explored, gt, mpp = client.get_coverage_stats()
+    req.assert_called_once_with({"cmd": "get_coverage_stats"})
+    assert explored == 4.0
+    assert gt == 12.5
+    assert mpp == 0.05
+
+
+def test_ipc_get_coverage_stats_error_negative():
+    client = HabitatIpcClient()
+    with patch.object(
+        client,
+        "_request",
+        side_effect=HabitatIpcError("unknown cmd 'get_coverage_stats'"),
+    ):
+        with pytest.raises(HabitatIpcError, match="get_coverage_stats"):
+            client.get_coverage_stats()
+
+
+def test_mock_get_coverage_stats_positive():
+    driver = MockHabitatDriver()
+    explored, gt, mpp = driver.get_coverage_stats()
+    assert 0.0 < explored <= gt
+    assert mpp == 0.05
+
+
 def test_harness_negative_control():
     with pytest.raises(AssertionError):
         assert 1 == 2

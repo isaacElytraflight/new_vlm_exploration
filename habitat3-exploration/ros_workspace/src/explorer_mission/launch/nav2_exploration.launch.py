@@ -6,6 +6,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
+from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -17,6 +18,7 @@ def generate_launch_description() -> LaunchDescription:
     nav2_params = os.path.join(explorer_share, "config", "nav2_params.yaml")
 
     use_privileged_map = LaunchConfiguration("use_privileged_map")
+    use_pc_mapper = LaunchConfiguration("use_pc_mapper")
     realtime_mode = LaunchConfiguration("realtime_mode")
     navigation_mode = LaunchConfiguration("navigation_mode")
     frontiers_grid_topic = LaunchConfiguration("frontiers_grid_topic")
@@ -53,6 +55,7 @@ def generate_launch_description() -> LaunchDescription:
 
     return LaunchDescription([
         DeclareLaunchArgument("use_privileged_map", default_value="false"),
+        DeclareLaunchArgument("use_pc_mapper", default_value="true"),
         DeclareLaunchArgument("realtime_mode", default_value="false"),
         DeclareLaunchArgument("navigation_mode", default_value="nav2"),
         DeclareLaunchArgument(
@@ -106,6 +109,7 @@ def generate_launch_description() -> LaunchDescription:
             package="explorer_bridge",
             executable="known_pose_mapper_node",
             name="known_pose_mapper",
+            condition=UnlessCondition(use_pc_mapper),
             parameters=[{
                 "scan_topic": "/scan",
                 "grid_topic": "/grid_map",
@@ -119,6 +123,36 @@ def generate_launch_description() -> LaunchDescription:
                 "odom_cache_size": 2048,
                 "pending_scan_limit": 128,
                 "obstacle_inflation_m": 0.10,
+            }],
+            output="screen",
+        ),
+
+        Node(
+            package="explorer_bridge",
+            executable="known_pose_pc_mapper_node",
+            name="known_pose_pc_mapper",
+            condition=IfCondition(use_pc_mapper),
+            parameters=[{
+                "depth_topic": "/depth_data",
+                "camera_info_topic": "/depth/camera_info",
+                "grid_topic": "/grid_map",
+                "map_frame": "map",
+                "resolution": 0.05,
+                "initial_size_m": 20.0,
+                "publish_hz": 5.0,
+                "odom_topic": "/odom",
+                "max_stamp_skew_sec": 0.0,
+                "odom_cache_size": 2048,
+                "pending_depth_limit": 128,
+                "obstacle_inflation_m": 0.10,
+                "range_min": 0.1,
+                "range_max": 10.0,
+                "sensor_far": 50.0,
+                "sat_eps": 0.5,
+                "camera_z": 0.1,
+                "wall_height_min_m": 0.05,
+                "wall_height_max_m": 1.0,
+                "subsample": 4,
             }],
             output="screen",
         ),
@@ -148,7 +182,6 @@ def generate_launch_description() -> LaunchDescription:
             name="coverage_metrics",
             parameters=[{
                 "odom_topic": "/odom",
-                "grid_topic": "/grid_map",
                 "image_topic": "/exploration/debug/coverage_vs_distance_img",
             }],
             output="screen",

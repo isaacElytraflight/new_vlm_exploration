@@ -56,6 +56,7 @@ QoS: `sensor_data` profile (best effort, keep last).
 |-------|------|-----|-------------|
 | `exploration/frontier_tree` | `explorer_msgs/FrontierTree` | transient_local | Full decision tree (positions, scores, parent/child, `current_node_id`) |
 | `exploration/status` | `explorer_msgs/ExplorationStatus` | transient_local | Phase transitions: `scanning`, `detecting`, `awaiting_vlm`, `selecting`, `navigating`, `backtracking`, `complete` |
+| `/exploration/debug/status_img` | `sensor_msgs/CompressedImage` | depth 1 | Live HUD of current phase, dwell time, and recent events (Elytra **Exploration Status**) |
 | `/map_renderer/map_img` | `sensor_msgs/CompressedImage` | depth 1 | Bird's-eye viz for Elytra (tree nodes labeled with VLM score 0–5) |
 
 ### Tier 2 — internal pipeline
@@ -77,7 +78,7 @@ QoS: `sensor_data` profile (best effort, keep last).
 
 | Symptom | Echo |
 |---------|------|
-| Stuck waiting on VLM | `exploration/status`, `exploration/vlm/scores` |
+| Stuck spinning in place | `exploration/status` / **Exploration Status** view: `scanning`+rotate_360 = SM; `navigating` = Nav2 |
 | Wrong navigation target | `exploration/frontier_tree`, `/plan` |
 | Tree not updating | `exploration/frontier_tree` |
 | Episode finished? | `exploration/status` (`exploration_complete`) |
@@ -87,9 +88,10 @@ QoS: `sensor_data` profile (best effort, keep last).
 Default launch (`nav2_exploration.launch.py`) mirrors the real robot (T265 pose + depth mapping):
 
 1. Privileged pose: Habitat GT (sim) or T265 (real) → `/odom` + `odom`→`base_link`; `map`→`odom` identity
-2. `/depth_data` → `depth_to_laserscan` → `/scan`
-3. `/scan` + matching `/odom` stamp → `known_pose_mapper` → `/grid_map` (no slam_toolbox)
-4. `explore_node` reads `/grid_map` on demand at tree leaf nodes
+2. **Mapping (default, `use_pc_mapper:=true`):** `/depth_data` + `/depth/camera_info` + matching `/odom` stamp → `known_pose_pc_mapper` → `/grid_map`. Full FOV ray-carve; OCCUPIED only for hits **0.05–1.0 m** above floor (robot-height band).
+3. **Legacy mapping (`use_pc_mapper:=false`):** `/depth_data` → `depth_to_laserscan` → `/scan` → `known_pose_mapper` → `/grid_map`
+4. `/scan` from `depth_to_laserscan` still published for Nav2 obstacle layers when PC mapper is active
+5. `explore_node` reads `/grid_map` on demand at tree leaf nodes
 
 Debug-only: `use_privileged_map:=true` restores `habitat_map_node` (Habitat pathfinder / `get_map` IPC).
 Dashboard: **Depth Debug** view colorizes `/depth_data` (NaN / zero / sat / valid).
@@ -119,6 +121,8 @@ to “free” (`free_near_eps`). That hid real far walls and did not stop floor 
 ### Navigation
 
 - **Default:** `explore_node` with `navigation_mode:=nav2` sends `NavigateToPose` goals; Nav2 plans on costmaps; `/cmd_vel` is converted to discrete Habitat steps via `cmd_vel_to_discrete_node`.
+- **No-recovery BT:** `config/navigate_to_pose_no_recovery.xml` — plan fail aborts immediately (no Spin/BackUp). Explore marks that frontier fully explored and moves on.
+- **Planner:** Navfn `allow_unknown: false`, goal `tolerance: 1.0` m.
 - **Fallback:** `navigation_mode:=discrete` uses straight-line `discrete_navigator` + `/movement/discrete_move` (no obstacle planning).
 
 ### Exploration loop (frontier tree)
