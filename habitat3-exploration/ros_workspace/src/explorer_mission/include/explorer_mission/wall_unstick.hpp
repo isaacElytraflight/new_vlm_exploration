@@ -26,10 +26,9 @@ struct UnstickDecision
   bool mark_frontier_dead{false};
 };
 
-/// Safer recovery policy:
-/// - Unstick if START_OCCUPIED or clearance < min.
-/// - Mark frontier dead mainly on GOAL_OCCUPIED, or NO_VALID_PATH after unstick
-///   (also mark other non-start failures so stuck/timeout still progress the tree).
+/// Recovery policy after NavigateToPose failure:
+/// unstick on START_OCCUPIED or low clearance; mark frontiers dead mainly on
+/// GOAL_OCCUPIED or NO_VALID_PATH (including after an unstick attempt).
 UnstickDecision decideNavFailureRecovery(
   uint16_t error_code,
   double clearance_m,

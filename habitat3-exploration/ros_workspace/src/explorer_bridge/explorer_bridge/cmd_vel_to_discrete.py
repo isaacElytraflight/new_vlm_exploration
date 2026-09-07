@@ -10,17 +10,18 @@ from explorer_msgs.action import DiscreteMove
 
 @dataclass(frozen=True)
 class CmdVelThresholds:
+    """Thresholds for quantizing continuous Twist into Habitat DiscreteMove."""
+
     # Pure rotate-in-place (linear≈0): accept small angular so Nav2 can align.
     angular_threshold: float = 0.05
     linear_threshold: float = 0.03
-    # When both lin and ang are significant: |ang|/|lin| above this → turn
-    # (sharp curve / wall-avoid), else drive (mild RPP path curvature).
-    # Units: (rad/s) / (m/s). Wall-hit logs had ~1.5–2.0; mild follow ~0.5.
+    # Curvature gate: |angular|/|linear| (rad/m). Above → turn; below → drive.
+    # Mild path following is typically ~0.5; sharp wall-around arcs exceed ~1.0.
     turn_over_drive_ratio: float = 1.0
-    # Once turning, ignore opposite angular below this — BUT max_turn_steps_before_flip
-    # caps long-way spins when path updates flip the short direction.
+    # Once turning, ignore opposite angular below this — unless we have already
+    # committed max_turn_steps_before_flip (≈180°), then allow the short way.
     turn_flip_angular_threshold: float = 0.2
-    max_turn_steps_before_flip: int = 18  # 18 * 10° = 180°
+    max_turn_steps_before_flip: int = 18  # 18 × 10° = 180°
     turn_step_deg: float = 10.0
     move_step_m: float = 0.25
 

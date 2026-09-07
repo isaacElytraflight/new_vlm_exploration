@@ -6,6 +6,48 @@ Add a new dated section at the top when you work on this repo.
 
 ---
 
+## 2026-09-06 — Session closeout (stepping-off point)
+
+### Shipped this arc (summary)
+
+| Area | Outcome |
+|------|---------|
+| Mapping speed | C++ `known_pose_pc_mapper` (subsample 8, pose gate, early-stop carve); grid inflate **0.05 m** |
+| IPC latency | Async coverage worker + cached GT/navmesh; `get_coverage_stats` non-blocking |
+| Discrete motion | `turn_over_drive_ratio` (default 1.0) so sharp `|ang|/|lin|` turns instead of driving into walls |
+| Nav recovery | Wall-unstick (clearance / START_OCCUPIED); return-home guard; stuck 1 m / 60 s / 300 s total |
+| Nav2 costmaps | Inflation **0.30 → 0.15 m** (global + local) |
+| Instrumentation | Removed all TEMP timing CSVs; removed TEMP wall-collision diag after root cause (curvature quantization) |
+
+### Live stuck case (same day, post-unstick)
+
+- Phase: return-home to root `(0,0)` from `(0.32, -5.73)`.
+- Planner: `NO_VALID_PATH` (208) — NavFn “legal potential found” but path extract failed.
+- Occupancy BFS robot→origin: **connected**; both cells free. Failure attributed to **inflated costmap**, not raw `/grid_map`.
+- Unstick did **not** run: clearance **0.259 m** ≥ gate **0.25 m**.
+- Mitigation shipped afterward: inflation 0.15 m. Residual: consider treating near-threshold `NO_VALID_PATH` as unstick-worthy.
+
+### Memory audit (not fixed yet)
+
+Highest-risk unbounded / churn sources for long episodes:
+
+1. Bridge JPEG pool unbounded queue (`explorer_bridge_node._enqueue_jpeg`).
+2. Coverage worker full-map realloc loop (`habitat_engine._coverage_loop`).
+3. `maprender_node.trajectory` never trimmed.
+
+See FUTURE_GOALS § Open goals → Runtime robustness.
+
+### Docs / cleanup at closeout
+
+- FUTURE_GOALS rewritten: Goal A + B v1 archived; open work is paper eval + robustness.
+- TEMP wall-collision diag module and call sites deleted (behavior of DiscreteMove / cmd_vel unchanged aside from no CSV/WARN spam).
+
+### Next section of the project
+
+Start from FUTURE_GOALS open goals: (1) paper-ready eval FOV/plots/greedy, (2) memory/robustness pass, then scale ablations.
+
+---
+
 ## 2026-09-06 — Wall unstick on invalid Nav2 start
 
 ### Symptom
@@ -55,22 +97,11 @@ Linear-first `cmd_vel_to_intent` ignored angular whenever `|lin| > 0.03` (intent
 ### Shipped
 
 - Removed all TEMP timing CSV instrumentation (motion / IPC / cmd_vel / nav / depth) — behavior unchanged
-- TEMP wall-collision diagnostics:
-  - `explorer_bridge/wall_collision_diag.py` → `/data/temp_wall_collision_diag.csv` (host `sim/data/`)
-  - `cmd_vel_to_discrete_node`: `dispatch` rows with cmd_vel + plan cross-track / yaw error
-  - `explorer_bridge_node`: `step` / `step_fail` rows with Habitat `collided` + pose delta; WARN on collide or no-progress move
+- TEMP wall-collision diagnostics added for the discrete-vs-plan wall bump (CSV under `/data/`)
 
-### How to reproduce
+### Follow-up
 
-1. Restart exploration episode (Python nodes pick up diag; packages rebuilt)
-2. When robot walks into a wall despite planner going around, note wall-clock time
-3. Inspect `habitat3-exploration/sim/data/temp_wall_collision_diag.csv` around that time: look for `FORWARD` dispatch with large `yaw_err_rad` / `cross_track_m`, then `step` with `collided=1` or `stuck_like`
-
-### Hypotheses to check in CSV
-
-- Discrete quantization ignores path curvature (FORWARD while yaw_err large)
-- Habitat `collided=1` ignored / still succeeding DiscreteMove
-- Map lag vs plan (plan looks free, sim collides)
+Root cause was linear-first `cmd_vel` quantization (fixed via `turn_over_drive_ratio`). TEMP wall-collision diag **removed at 2026-09-06 closeout** once the fix landed.
 
 ---
 
@@ -82,7 +113,7 @@ Linear-first `cmd_vel_to_intent` ignored angular whenever `|lin| > 0.03` (intent
 - IPC `get_coverage_stats` returns **latest cache** immediately (no 444 ms accept-loop stall)
 - Cached navmesh `get_topdown_view` + GT floor area (avoid double rasterize)
 - Reveal flood-fill runs **off** the sim lock; sim lock only for brief Habitat API access
-- Restart episode to load engine changes; re-check `temp_habitat_ipc_timing.csv` / motion CSV
+- Restart episode to load engine changes
 
 ---
 
@@ -113,7 +144,6 @@ Restart episode so habitat_engine + launch inflation reload.
   - `OccupancyMap`, in-place Bresenham with **early stop on OCCUPIED**
   - `subsample` default **8**
   - Pose gate: integrate only if Δxy ≥ **0.25 m** or |Δyaw| ≥ **0.17 rad**
-  - TEMP timing CSV still at `/data/temp_depth_timing.csv`
 - Launch + design_doc updated; Python PC mapper entry point removed (file kept for reference)
 
 ### Verify
