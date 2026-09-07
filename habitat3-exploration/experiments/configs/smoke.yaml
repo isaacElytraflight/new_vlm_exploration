@@ -1,0 +1,22 @@
+# Goal B smoke matrix: 2 algorithms × 1 scene × 2 seeds (4 runs).
+experiment_id: smoke_vlm_vs_greedy_2026q3
+n_runs_per_cell: 2
+timeout_s: 7200
+artifact_root: sim/data/experiments
+
+eval:
+  fov_deg: 360
+  reveal_radius_m: 5.0
+
+algorithms:
+  - id: vlm_dfs
+    profile: exploration_policy_vlm_default
+  - id: greedy_nearest
+    profile: exploration_policy_greedy
+
+scenes:
+  - JmbYfDe2QKZ
+
+seeds:
+  mode: sequential
+  start: 0

@@ -52,6 +52,18 @@ buttons:
     description: Stop the running Habitat episode
     kind: script
     stopAction: true
+  - id: start-ablation
+    label: Start Ablation Batch
+    description: >-
+      Run the Goal B experiment matrix unattended (smoke config by default).
+      Progress shows run index and live exploration phase.
+    kind: ablation
+    experimentConfig: experiments/configs/smoke.yaml
+  - id: stop-ablation
+    label: Stop Ablation
+    description: Cancel the running ablation batch after the current run finishes cleanup
+    kind: script
+    stopAblation: true
   - id: step-forward
     label: Step Forward
     description: Move forward one discrete step (0.25 m). Requires a running episode.

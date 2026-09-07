@@ -130,7 +130,7 @@ This is denser **RGB-D occupancy mapping**, not “dump points into cells.”
 
 ## Goal B — Multi-run ablation / comparison framework
 
-**Status:** Schema and orchestration defaults selected (2026-08-26) — implement after Goal A (or after mapping is “good enough” for fair planner comparisons).  
+**Status:** v1 CLI + Elytra GUI progress (2026-08-31) — smoke matrix, SQLite, aggregate CLI, Start/Stop Ablation buttons.  
 **Priority:** P2.
 
 ### Motivation
@@ -235,13 +235,13 @@ seeds:
 
 ### Gaps to build (when Goal B starts)
 
-1. Batch orchestrator (matrix expand → loop → cleanup).
-2. Waiter + timeout + failure classification.
-3. SQLite writer + artifact directory layout (`experiments/<id>/<run_id>/`).
-4. Privileged coverage evaluator aligned with thesis (FOV × radius).
-5. Path-revisit histogram from logged poses.
-6. Aggregate report script (tables + coverage-vs-distance plots).
-7. Optional: Elytra button that shells the same CLI.
+1. ~~Batch orchestrator (matrix expand → loop → cleanup).~~ **Done** — `experiments/run_experiment.py`
+2. ~~Waiter + timeout + failure classification.~~ **Done** — `sim/scripts/experiment_collect.py`
+3. ~~SQLite writer + artifact directory layout (`experiments/<id>/<run_id>/`).~~ **Done** — `experiments/db.py`, `sim/data/experiments/`
+4. Privileged coverage evaluator aligned with thesis (FOV × radius). **Partial** — radius via `HABITAT_SENSOR_RANGE_M`; FOV 90° mode still open
+5. ~~Path-revisit histogram from logged poses.~~ **Done** — `experiments/metrics.py`
+6. ~~Aggregate report script (tables + coverage-vs-distance plots).~~ **Tables done** — `experiments/aggregate_results.py`; plots deferred
+7. Optional: Elytra button that shells the same CLI. **Done** — Start/Stop Ablation buttons + progress bar (2026-08-31)
 
 ### Non-goals for Goal B v1
 
@@ -284,10 +284,36 @@ seeds:
 
 **Next:** When ready to implement, open a dedicated session for Goal A only; append parameter lock notes here before coding.
 
-### 2026-08-26/27 — Goal A implemented + Nav2 fail-fast; open cascade exhaustion
+### 2026-08-28 — Return-home guard (cascade frontier exhaustion)
+
+**Context:** JOURNAL open issue — fail-fast Nav2 lets explore mark many sibling frontiers dead from a bad pose when return-to-scan-node also fails.
+
+**Decision:** After child nav failure, **block** further frontier selection until return to the current scan node succeeds (retry loop, default 20 attempts). Only the failed child is marked `fully_explored`. Implemented via `ReturnHomeGuard` + `returnToScanNodeWithRetry` in `explore_node`.
+
+**Gate:** Episode no longer wipes sibling frontiers in one cascade; verify on lower-floor scene with PC mapper.
+
+### 2026-08-31 — Goal B v1: CLI batch harness + SQLite
+
+**Shipped:**
+- `experiments/` package: YAML matrix expand, SQLite schema, revisit bins, aggregate mean±std
+- `run_experiment.py` (host) → docker tmux episode → `experiment_collect.py` (container)
+- Profiles: `exploration_policy_vlm_default`, `exploration_policy_greedy` via `apply_exploration_profile.sh`
+- Seeds: `HABITAT_SPAWN_SEED`; reveal radius: `HABITAT_SENSOR_RANGE_M` from `eval.reveal_radius_m`
+- Smoke config: `experiments/configs/smoke.yaml` (2 algos × 1 scene × 2 seeds)
+
+**Run:**
+```bash
+cd habitat3-exploration
+python experiments/run_experiment.py experiments/configs/smoke.yaml
+python experiments/aggregate_results.py smoke_vlm_vs_greedy_2026q3
+```
+
+**Still open:** 90° FOV privileged eval, coverage-vs-distance plot export, true greedy-without-VLM baseline.
+
+---
 
 **Locked for Goal A v1:** wall band **0.05–1.0 m**; FREE does not overwrite OCCUPIED; `use_pc_mapper` default true.
 
-**Nav2:** no-recovery BT + tolerance 1.0 m. Side effect: rapid multi-frontier exhaustion from a bad pose — next session: **return-to-parent before selecting another frontier** (see JOURNAL closeout).
+**Nav2:** no-recovery BT + tolerance 1.0 m. Cascade exhaustion mitigated by return-home guard (2026-08-28).
 
 ---
