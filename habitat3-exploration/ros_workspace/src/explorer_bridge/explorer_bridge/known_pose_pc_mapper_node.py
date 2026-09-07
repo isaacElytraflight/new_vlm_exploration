@@ -59,7 +59,7 @@ class KnownPosePcMapperNode(Node):
         self.declare_parameter("odom_cache_size", 2048)
         self.declare_parameter("max_stamp_skew_sec", 0.0)
         self.declare_parameter("pending_depth_limit", 128)
-        self.declare_parameter("obstacle_inflation_m", 0.10)
+        self.declare_parameter("obstacle_inflation_m", 0.05)
         self.declare_parameter("range_min", 0.1)
         self.declare_parameter("range_max", 10.0)
         self.declare_parameter("sensor_far", 50.0)
@@ -185,13 +185,16 @@ class KnownPosePcMapperNode(Node):
 
         depth = image_to_depth_array(msg)
         sig = depth_content_signature(depth, stride=self._subsample)
+
         robot_x, robot_y, yaw = pose
-        if not should_integrate_scan(
+        should_integrate = should_integrate_scan(
             signature=sig,
             yaw=yaw,
             last_signature=self._last_sig,
             last_yaw=self._last_yaw,
-        ):
+        )
+
+        if not should_integrate:
             return True
 
         integrate_depth_frame(

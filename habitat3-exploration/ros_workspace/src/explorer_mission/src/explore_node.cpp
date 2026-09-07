@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <map>
 #include <memory>
@@ -37,6 +38,9 @@
 #include "explorer_mission/frontier_detection.hpp"
 #include "explorer_mission/frontier_tree.hpp"
 #include "explorer_mission/nav2_navigator.hpp"
+#include "explorer_mission/return_home_guard.hpp"
+#include "explorer_mission/stuck_progress.hpp"
+#include "explorer_mission/wall_unstick.hpp"
 
 using DiscreteMove = explorer_msgs::action::DiscreteMove;
 using Rotate360 = explorer_msgs::action::Rotate360;
@@ -63,6 +67,9 @@ public:
     goal_accept_radius_m_ = declare_parameter<double>("goal_accept_radius_m", 1.0);
     parent_to_nearest_node_ = declare_parameter<bool>("parent_to_nearest_node", true);
     early_nav_min_score_ = declare_parameter<int>("early_nav_min_score", 3);
+    return_home_max_attempts_ = declare_parameter<int>("return_home_max_attempts", 20);
+    unstick_min_clearance_m_ = declare_parameter<double>("unstick_min_clearance_m", 0.25);
+    unstick_max_steps_ = declare_parameter<int>("unstick_max_steps", 8);
 
     param_callback_handle_ = add_on_set_parameters_callback(
       [this](const std::vector<rclcpp::Parameter> & params) {
@@ -233,10 +240,15 @@ public:
               publishPhase(
                 "navigating", current->id, *batch_pick, false,
                 "batch/nearest child score=" + std::to_string(batch_child->openness_score));
-              const bool ok = navigateToPosition(batch_child->position, batch_child->position);
-              if (!ok) {
-                tree_.markFullyExplored(*batch_pick);
-                publishTree();
+              const auto nav = navigateWithUnstickRecovery(
+                batch_child->position, batch_child->position);
+              if (!nav.ok) {
+                if (nav.mark_frontier_dead) {
+                  tree_.markFullyExplored(*batch_pick);
+                  publishTree();
+                }
+                return_home_guard_.onChildNavFailed(current->id);
+                returnToScanNodeWithRetry(current);
                 continue;
               }
               tree_.setCurrentNodeId(*batch_pick);
@@ -271,11 +283,16 @@ public:
         publishPhase(
           "backtracking", current->id, parent_id, false,
           "returning to parent");
-        if (!navigateToPosition(parent->position, parent->position)) {
+        if (!navigateWithUnstickRecovery(parent->position, parent->position).ok) {
           RCLCPP_WARN(get_logger(), "Backtrack navigation failed toward parent %u.", parent_id);
         }
         tree_.setCurrentNodeId(parent_id);
         publishTree();
+        continue;
+      }
+
+      if (return_home_guard_.isAwaitingReturn()) {
+        returnToScanNodeWithRetry(current);
         continue;
       }
 
@@ -294,16 +311,14 @@ public:
         "navigating", current->id, *child_id, false,
         "selected child score=" + std::to_string(child->openness_score));
 
-      const bool ok = navigateToPosition(child->position, child->position);
-      if (!ok) {
-        tree_.markFullyExplored(*child_id);
-        publishTree();
-        publishPhase(
-          "backtracking", current->id, current->id, false,
-          "nav/plan failed; frontier dead — return to scan node");
-        if (!navigateToPosition(current->position, current->position)) {
-          RCLCPP_WARN(get_logger(), "Return to parent after nav failure also failed.");
+      const auto nav = navigateWithUnstickRecovery(child->position, child->position);
+      if (!nav.ok) {
+        if (nav.mark_frontier_dead) {
+          tree_.markFullyExplored(*child_id);
+          publishTree();
         }
+        return_home_guard_.onChildNavFailed(current->id);
+        returnToScanNodeWithRetry(current);
         continue;
       }
 
@@ -688,6 +703,166 @@ private:
     publishPhase("scanning", tree_.currentNodeId(), 0, false, "rotate_360 done");
   }
 
+  bool returnToScanNodeWithRetry(const explorer_mission::TreeNode * scan_node)
+  {
+    if (!scan_node) {
+      return false;
+    }
+
+    publishPhase(
+      "backtracking", tree_.currentNodeId(), scan_node->id, false,
+      "nav/plan failed — return to scan node before next frontier");
+
+    for (int attempt = 1; attempt <= return_home_max_attempts_; ++attempt) {
+      if (navigateWithUnstickRecovery(scan_node->position, scan_node->position).ok) {
+        return_home_guard_.onReturnHomeSucceeded();
+        return true;
+      }
+
+      RCLCPP_WARN(
+        get_logger(),
+        "Return to scan node %u failed (attempt %d/%d); retrying.",
+        scan_node->id, attempt, return_home_max_attempts_);
+      rclcpp::sleep_for(std::chrono::seconds(1));
+    }
+
+    return false;
+  }
+
+  struct NavAttemptResult
+  {
+    bool ok{false};
+    bool mark_frontier_dead{true};
+  };
+
+  double currentClearanceM()
+  {
+    nav_msgs::msg::OccupancyGrid grid;
+    {
+      std::lock_guard<std::mutex> lock(grid_mutex_);
+      if (!have_grid_) {
+        return std::numeric_limits<double>::infinity();
+      }
+      grid = latest_grid_;
+    }
+    const auto c = explorer_mission::clearanceToOccupiedM(
+      grid, current_pos_.x, current_pos_.y);
+    return c.value_or(std::numeric_limits<double>::infinity());
+  }
+
+  uint16_t lastNavErrorCode() const
+  {
+    if (navigation_mode_ == "nav2" && nav2_navigator_) {
+      return nav2_navigator_->lastErrorCode();
+    }
+    return explorer_mission::kNavErrorNone;
+  }
+
+  bool sendOneDiscreteMove(int direction, int steps)
+  {
+    DiscreteMove::Goal goal;
+    goal.direction = static_cast<uint8_t>(direction);
+    goal.steps = static_cast<uint32_t>(steps);
+    auto future = discrete_move_client_->async_send_goal(goal);
+    if (future.wait_for(std::chrono::seconds(30)) != std::future_status::ready) {
+      return false;
+    }
+    const auto goal_handle = future.get();
+    if (!goal_handle) {
+      return false;
+    }
+    auto result_future = discrete_move_client_->async_get_result(goal_handle);
+    if (result_future.wait_for(std::chrono::seconds(60)) != std::future_status::ready) {
+      discrete_move_client_->async_cancel_goal(goal_handle);
+      return false;
+    }
+    const auto wrapped = result_future.get();
+    if (wrapped.code != rclcpp_action::ResultCode::SUCCEEDED || !wrapped.result->success) {
+      return false;
+    }
+    updateRobotPoseFromTf();
+    return true;
+  }
+
+  void runWallUnstick()
+  {
+    RCLCPP_WARN(
+      get_logger(),
+      "Wall unstick: gradient steps away from occupied (max %d, min_clearance=%.2f m)",
+      unstick_max_steps_, unstick_min_clearance_m_);
+    for (int i = 0; i < unstick_max_steps_; ++i) {
+      updateRobotPoseFromTf();
+      nav_msgs::msg::OccupancyGrid grid;
+      {
+        std::lock_guard<std::mutex> lock(grid_mutex_);
+        if (!have_grid_) {
+          break;
+        }
+        grid = latest_grid_;
+      }
+      const auto clearance = explorer_mission::clearanceToOccupiedM(
+        grid, current_pos_.x, current_pos_.y);
+      if (clearance.has_value() && *clearance >= unstick_min_clearance_m_) {
+        RCLCPP_INFO(
+          get_logger(), "Wall unstick: clearance %.3f m OK after %d step(s)",
+          *clearance, i);
+        return;
+      }
+      const auto grad = explorer_mission::clearanceGradientDir(
+        grid, current_pos_.x, current_pos_.y);
+      if (!grad.has_value()) {
+        RCLCPP_WARN(get_logger(), "Wall unstick: no clearance gradient; stopping");
+        return;
+      }
+      const double yaw_rad = current_yaw_deg_ * M_PI / 180.0;
+      const auto step = explorer_mission::nextUnstickStep(yaw_rad, *grad);
+      if (!step.has_value()) {
+        return;
+      }
+      if (!sendOneDiscreteMove(step->direction, step->steps)) {
+        RCLCPP_WARN(get_logger(), "Wall unstick: DiscreteMove failed; stopping");
+        return;
+      }
+    }
+  }
+
+  NavAttemptResult navigateWithUnstickRecovery(
+    const cv::Point2f & goal_pos, const cv::Point2f & look_at)
+  {
+    if (navigateToPosition(goal_pos, look_at)) {
+      return NavAttemptResult{true, false};
+    }
+
+    const uint16_t code = lastNavErrorCode();
+    const double clearance = currentClearanceM();
+    auto decision = explorer_mission::decideNavFailureRecovery(
+      code, clearance, unstick_min_clearance_m_, false);
+    RCLCPP_WARN(
+      get_logger(),
+      "Nav failed (error_code=%u clearance=%.3f): unstick=%d mark=%d — %s",
+      static_cast<unsigned>(code), clearance,
+      static_cast<int>(decision.attempt_unstick),
+      static_cast<int>(decision.mark_frontier_dead),
+      navigation_mode_ == "nav2" && nav2_navigator_ ?
+      nav2_navigator_->lastError().c_str() : "n/a");
+
+    if (decision.attempt_unstick) {
+      runWallUnstick();
+      if (navigateToPosition(goal_pos, look_at)) {
+        return NavAttemptResult{true, false};
+      }
+      decision = explorer_mission::decideNavFailureRecovery(
+        lastNavErrorCode(), currentClearanceM(), unstick_min_clearance_m_, true);
+      RCLCPP_WARN(
+        get_logger(),
+        "Nav retry after unstick failed (error_code=%u clearance=%.3f): mark=%d",
+        static_cast<unsigned>(lastNavErrorCode()), currentClearanceM(),
+        static_cast<int>(decision.mark_frontier_dead));
+    }
+
+    return NavAttemptResult{false, decision.mark_frontier_dead};
+  }
+
   bool navigateToPosition(const cv::Point2f & goal_pos, const cv::Point2f & look_at)
   {
     const double dx = look_at.x - current_pos_.x;
@@ -702,11 +877,16 @@ private:
     if (navigation_mode_ == "nav2" && nav2_navigator_) {
       const double goal_yaw_rad = goal_yaw_deg * M_PI / 180.0;
       const bool ok = nav2_navigator_->navigateToPose(
-        goal_x, goal_y, goal_yaw_rad, map_frame_, 120.0, 60.0, 0.1,
+        goal_x, goal_y, goal_yaw_rad, map_frame_,
+        explorer_mission::kNavTotalTimeoutS,
+        explorer_mission::kNavStuckTimeoutS,
+        explorer_mission::kNavStuckDistanceM,
         [this]() {
           updateRobotPoseFromTf();
           nav2_navigator_->noteProgress(
-            current_pos_.x, current_pos_.y, 0.1, 60.0);
+            current_pos_.x, current_pos_.y,
+            explorer_mission::kNavStuckDistanceM,
+            explorer_mission::kNavStuckTimeoutS);
           return true;
         },
         goal_accept_radius_m_);
@@ -771,6 +951,11 @@ private:
   double goal_accept_radius_m_{1.0};
   bool parent_to_nearest_node_{true};
   int early_nav_min_score_{3};
+  int return_home_max_attempts_{20};
+  double unstick_min_clearance_m_{0.25};
+  int unstick_max_steps_{8};
+
+  explorer_mission::ReturnHomeGuard return_home_guard_;
 
   std::unique_ptr<explorer_mission::Nav2Navigator> nav2_navigator_;
   explorer_mission::FrontierTree tree_;

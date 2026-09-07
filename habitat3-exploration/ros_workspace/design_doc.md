@@ -88,7 +88,7 @@ QoS: `sensor_data` profile (best effort, keep last).
 Default launch (`nav2_exploration.launch.py`) mirrors the real robot (T265 pose + depth mapping):
 
 1. Privileged pose: Habitat GT (sim) or T265 (real) → `/odom` + `odom`→`base_link`; `map`→`odom` identity
-2. **Mapping (default, `use_pc_mapper:=true`):** `/depth_data` + `/depth/camera_info` + matching `/odom` stamp → `known_pose_pc_mapper` → `/grid_map`. Full FOV ray-carve; OCCUPIED only for hits **0.05–1.0 m** above floor (robot-height band).
+2. **Mapping (default, `use_pc_mapper:=true`):** `/depth_data` + `/depth/camera_info` + matching `/odom` stamp → **C++** `known_pose_pc_mapper` → `/grid_map`. Full FOV ray-carve with in-place Bresenham (stops at existing OCCUPIED); OCCUPIED only for hits **0.05–1.0 m** above floor. Default `subsample:=8`; integrates only on pose change (≥0.25 m or ≥~10° yaw).
 3. **Legacy mapping (`use_pc_mapper:=false`):** `/depth_data` → `depth_to_laserscan` → `/scan` → `known_pose_mapper` → `/grid_map`
 4. `/scan` from `depth_to_laserscan` still published for Nav2 obstacle layers when PC mapper is active
 5. `explore_node` reads `/grid_map` on demand at tree leaf nodes
@@ -122,7 +122,7 @@ to “free” (`free_near_eps`). That hid real far walls and did not stop floor 
 
 - **Default:** `explore_node` with `navigation_mode:=nav2` sends `NavigateToPose` goals; Nav2 plans on costmaps; `/cmd_vel` is converted to discrete Habitat steps via `cmd_vel_to_discrete_node`.
 - **No-recovery BT:** `config/navigate_to_pose_no_recovery.xml` — plan fail aborts immediately (no Spin/BackUp). Explore marks that frontier fully explored and moves on.
-- **Planner:** Navfn `allow_unknown: false`, goal `tolerance: 1.0` m.
+- **Planner:** Navfn `allow_unknown: true` (paths may traverse unexplored cells), goal `tolerance: 1.0` m.
 - **Fallback:** `navigation_mode:=discrete` uses straight-line `discrete_navigator` + `/movement/discrete_move` (no obstacle planning).
 
 ### Exploration loop (frontier tree)

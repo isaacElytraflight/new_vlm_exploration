@@ -20,6 +20,7 @@ import os
 import signal
 import socket
 import sys
+import threading
 from typing import Any, Dict, Optional, Tuple
 
 import math
@@ -60,6 +61,17 @@ SCENE = os.environ.get(
 SOCKET_PATH = os.environ.get("HABITAT_ENGINE_SOCKET", "/tmp/habitat_engine.sock")
 
 _running = True
+
+
+def _read_spawn_seed() -> Optional[int]:
+    raw = os.environ.get("HABITAT_SPAWN_SEED", "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"Warning: invalid HABITAT_SPAWN_SEED={raw!r}; ignoring", file=sys.stderr)
+        return None
 
 
 def _handle_stop(signum, frame) -> None:
@@ -141,11 +153,13 @@ def _sample_island_infos(pathfinder, *, samples: int = 4000) -> list[IslandInfo]
     return summarize_islands(pairs, areas)
 
 
-def apply_ground_floor_constraints(sim: habitat_sim.Simulator) -> int:
+def apply_ground_floor_constraints(sim: habitat_sim.Simulator, *, spawn_seed: Optional[int] = None) -> int:
     """Rebake navmesh to disconnect stairs and spawn on the ground-floor island.
 
     Returns the selected island index.
     """
+    if spawn_seed is not None:
+        np.random.seed(int(spawn_seed))
     pathfinder = sim.pathfinder
     if not pathfinder.is_loaded:
         raise RuntimeError("pathfinder not loaded")
@@ -181,9 +195,10 @@ class HabitatEngine:
     def __init__(self) -> None:
         if not os.path.exists(SCENE):
             raise SystemExit(f"Scene not found: {SCENE} — run download_data.sh first.")
+        self._spawn_seed = _read_spawn_seed()
         self._sim = make_sim()
         if LOCK_GROUND_FLOOR:
-            apply_ground_floor_constraints(self._sim)
+            apply_ground_floor_constraints(self._sim, spawn_seed=self._spawn_seed)
         self._collided = False
         self._last_obs: Dict[str, Any] = self._sim.get_sensor_observations()
         if self._last_obs:
@@ -191,30 +206,59 @@ class HabitatEngine:
         # Accumulated mask of navmesh cells the agent has observed so far.
         self._explored: Optional[np.ndarray] = None
 
+        # Habitat-sim is not thread-safe: all sim/pathfinder access uses this lock.
+        self._sim_lock = threading.RLock()
+        # Cached navmesh top-down (expensive); reused until agent floor height changes.
+        self._nav_cache: Optional[np.ndarray] = None
+        self._nav_height: Optional[float] = None
+        self._nav_origin_x = 0.0
+        self._nav_origin_y = 0.0
+        self._gt_m2_cache: Optional[float] = None
+        # Latest coverage snapshot for non-blocking IPC reads.
+        self._coverage_cache: Optional[Tuple[float, float, float]] = None
+        self._coverage_stop = threading.Event()
+        self._coverage_thread = threading.Thread(
+            target=self._coverage_loop,
+            name="habitat-coverage",
+            daemon=True,
+        )
+        self._coverage_thread.start()
+
     def close(self) -> None:
-        self._sim.close()
+        self._coverage_stop.set()
+        if self._coverage_thread.is_alive():
+            self._coverage_thread.join(timeout=2.0)
+        with self._sim_lock:
+            self._sim.close()
 
     def reset(self) -> None:
-        self._sim.reset()
-        if LOCK_GROUND_FLOOR:
-            apply_ground_floor_constraints(self._sim)
-        self._last_obs = self._sim.get_sensor_observations()
-        self._collided = False
-        self._explored = None
+        with self._sim_lock:
+            self._sim.reset()
+            if LOCK_GROUND_FLOOR:
+                apply_ground_floor_constraints(self._sim, spawn_seed=self._spawn_seed)
+            self._last_obs = self._sim.get_sensor_observations()
+            self._collided = False
+            self._explored = None
+            self._nav_cache = None
+            self._nav_height = None
+            self._gt_m2_cache = None
+            self._coverage_cache = None
 
     def get_obs(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, bool]:
-        rgb = self._last_obs.get("rgb")
-        depth = self._last_obs.get("depth")
-        birdseye = self._last_obs.get("birdseye")
-        if rgb is None or depth is None or birdseye is None:
-            obs = self._sim.get_sensor_observations()
-            rgb = obs.get("rgb")
-            depth = obs.get("depth")
-            birdseye = obs.get("birdseye")
+        with self._sim_lock:
+            rgb = self._last_obs.get("rgb")
+            depth = self._last_obs.get("depth")
+            birdseye = self._last_obs.get("birdseye")
+            if rgb is None or depth is None or birdseye is None:
+                obs = self._sim.get_sensor_observations()
+                rgb = obs.get("rgb")
+                depth = obs.get("depth")
+                birdseye = obs.get("birdseye")
+            collided = self._collided
         rgb_arr = np.ascontiguousarray(rgb[..., :3], dtype=np.uint8)
         depth_arr = np.ascontiguousarray(depth.squeeze(), dtype=np.float32)
         birdseye_arr = np.ascontiguousarray(birdseye[..., :3], dtype=np.uint8)
-        return rgb_arr, depth_arr, birdseye_arr, self._collided
+        return rgb_arr, depth_arr, birdseye_arr, collided
 
     def step(self, action: str, count: int) -> Tuple[bool, int]:
         allowed = {"move_forward", "move_backward", "turn_left", "turn_right"}
@@ -222,76 +266,57 @@ class HabitatEngine:
             raise ValueError(f"unknown action {action!r}")
         completed = 0
         collided = False
-        for _ in range(max(0, int(count))):
-            obs = self._sim.step(action)
-            self._last_obs = obs
-            collided = bool(obs.get("collided", False))
-            self._collided = collided
-            completed += 1
+        with self._sim_lock:
+            for _ in range(max(0, int(count))):
+                obs = self._sim.step(action)
+                self._last_obs = obs
+                collided = bool(obs.get("collided", False))
+                self._collided = collided
+                completed += 1
         return collided, completed
 
     def get_pose(self) -> Tuple[float, float, float]:
         """Return (x, y, yaw_rad) in ROS plan frame (X forward at spawn, Y left)."""
-        state = self._sim.get_agent(0).get_state()
-        pos = state.position
-        rot = state.rotation
-        if not isinstance(rot, mn.Quaternion):
-            # habitat returns a numpy-quaternion (w, x, y, z); magnum's
-            # constructor needs an explicit (Vector3 xyz, scalar w).
-            rot = mn.Quaternion(
-                mn.Vector3(float(rot.x), float(rot.y), float(rot.z)), float(rot.w)
-            )
-        forward = rot.transform_vector_normalized(mn.Vector3(0.0, 0.0, -1.0))
-        # Keep conversion import-light inside the engine process (conda env).
-        ros_x = -float(pos[2])
-        ros_y = -float(pos[0])
-        yaw = float(np.arctan2(-float(forward.x), -float(forward.z)))
-        return ros_x, ros_y, yaw
+        with self._sim_lock:
+            state = self._sim.get_agent(0).get_state()
+            pos = state.position
+            rot = state.rotation
+            if not isinstance(rot, mn.Quaternion):
+                # habitat returns a numpy-quaternion (w, x, y, z); magnum's
+                # constructor needs an explicit (Vector3 xyz, scalar w).
+                rot = mn.Quaternion(
+                    mn.Vector3(float(rot.x), float(rot.y), float(rot.z)), float(rot.w)
+                )
+            forward = rot.transform_vector_normalized(mn.Vector3(0.0, 0.0, -1.0))
+            # Keep conversion import-light inside the engine process (conda env).
+            ros_x = -float(pos[2])
+            ros_y = -float(pos[0])
+            yaw = float(np.arctan2(-float(forward.x), -float(forward.z)))
+            return ros_x, ros_y, yaw
 
-    def get_map(self) -> Tuple[np.ndarray, float, float, float]:
-        """Return (grid int8 HxW, resolution, origin_x, origin_y).
-
-        The grid is an *incrementally revealed* occupancy map: FREE(0) /
-        OCCUPIED(100) for cells the agent has observed, UNKNOWN(-1) otherwise.
-        This is what makes frontier detection possible (vs. the raw navmesh,
-        which is fully known and therefore frontier-free)."""
-        pf = self._sim.pathfinder
-        if not pf.is_loaded:
-            raise RuntimeError("pathfinder not loaded")
-        pos = self._sim.get_agent(0).get_state().position
-        # get_topdown_view needs the vertical slice height; use the agent's
-        # current floor height so the navmesh slice matches where it stands.
-        height = float(pos[1])
-        top_down = pf.get_topdown_view(MAP_METERS_PER_PIXEL, height)
-        navigable = np.asarray(top_down, dtype=bool)
-
-        lower, _upper = pf.get_bounds()
-        origin_x = float(lower[0])
-        origin_y = float(lower[2])
-        # Column = world x, row = world z (consistent with the bridge's TF /
-        # odom and the C++ pixelToWorld in frontier_detection).
-        agent_col = (float(pos[0]) - origin_x) / MAP_METERS_PER_PIXEL
-        agent_row = (float(pos[2]) - origin_y) / MAP_METERS_PER_PIXEL
-        radius_px = SENSOR_RANGE_M / MAP_METERS_PER_PIXEL
-
-        grid, self._explored = compute_revealed_grid(
-            navigable, self._explored, agent_col, agent_row, radius_px
-        )
-        return grid, MAP_METERS_PER_PIXEL, origin_x, origin_y
-
-    def get_floor_area(self) -> Tuple[float, float]:
-        """Return (mappable_area_m2, meters_per_pixel) from navmesh top-down.
-
-        Area = (navigable floor + adjacent wall cells) × mpp² so coverage GT
-        matches Habitat revealed free+occupied cells (not laser /grid_map).
-        """
+    def _ensure_nav_cache_locked(self) -> Tuple[np.ndarray, float, float]:
+        """Refresh cached pathfinder top-down if floor height changed. Holds lock."""
         pf = self._sim.pathfinder
         if not pf.is_loaded:
             raise RuntimeError("pathfinder not loaded")
         pos = self._sim.get_agent(0).get_state().position
         height = float(pos[1])
-        top_down = pf.get_topdown_view(MAP_METERS_PER_PIXEL, height)
-        navigable = np.asarray(top_down, dtype=bool)
+        if (
+            self._nav_cache is None
+            or self._nav_height is None
+            or abs(height - self._nav_height) > 0.05
+        ):
+            top_down = pf.get_topdown_view(MAP_METERS_PER_PIXEL, height)
+            self._nav_cache = np.asarray(top_down, dtype=bool).copy()
+            self._nav_height = height
+            lower, _upper = pf.get_bounds()
+            self._nav_origin_x = float(lower[0])
+            self._nav_origin_y = float(lower[2])
+            self._gt_m2_cache = None  # recompute GT for this slice
+        assert self._nav_cache is not None
+        return self._nav_cache, self._nav_origin_x, self._nav_origin_y
+
+    def _floor_area_from_navigable(self, navigable: np.ndarray) -> float:
         h, w = navigable.shape
         dilated = np.zeros((h, w), dtype=bool)
         for dr in (-1, 0, 1):
@@ -300,20 +325,77 @@ class HabitatEngine:
                 c0, c1 = max(0, dc), w + min(0, dc)
                 dilated[r0:r1, c0:c1] |= navigable[r0 - dr : r1 - dr, c0 - dc : c1 - dc]
         walls = dilated & (~navigable)
-        area = float(np.count_nonzero(navigable | walls)) * (MAP_METERS_PER_PIXEL ** 2)
-        return area, MAP_METERS_PER_PIXEL
+        return float(np.count_nonzero(navigable | walls)) * (MAP_METERS_PER_PIXEL ** 2)
 
-    def get_coverage_stats(self) -> Tuple[float, float, float]:
-        """Return (explored_m2, gt_m2, mpp) on the same navmesh top-down slice.
+    def get_map(self) -> Tuple[np.ndarray, float, float, float]:
+        """Return (grid int8 HxW, resolution, origin_x, origin_y).
 
-        Explored area comes from the privileged reveal map (free+walls), so it
-        cannot exceed GT. Laser /grid_map free+occupied can — and did — overshoot
-        GT and clamp the coverage chart at 1.0 while frontiers remained.
+        The grid is an *incrementally revealed* occupancy map: FREE(0) /
+        OCCUPIED(100) for cells the agent has observed, UNKNOWN(-1) otherwise.
+        This is what makes frontier detection possible (vs. the raw navmesh,
+        which is fully known and therefore frontier-free)."""
+        with self._sim_lock:
+            navigable, origin_x, origin_y = self._ensure_nav_cache_locked()
+            pos = self._sim.get_agent(0).get_state().position
+            agent_col = (float(pos[0]) - origin_x) / MAP_METERS_PER_PIXEL
+            agent_row = (float(pos[2]) - origin_y) / MAP_METERS_PER_PIXEL
+            radius_px = SENSOR_RANGE_M / MAP_METERS_PER_PIXEL
+            explored_in = None if self._explored is None else self._explored.copy()
+            nav_copy = navigable.copy()
+
+        # Reveal flood-fill off the sim lock so motion can proceed.
+        grid, explored_out = compute_revealed_grid(
+            nav_copy, explored_in, agent_col, agent_row, radius_px
+        )
+        with self._sim_lock:
+            self._explored = explored_out
+        return grid, MAP_METERS_PER_PIXEL, origin_x, origin_y
+
+    def get_floor_area(self) -> Tuple[float, float]:
+        """Return (mappable_area_m2, meters_per_pixel) from navmesh top-down.
+
+        Area = (navigable floor + adjacent wall cells) × mpp² so coverage GT
+        matches Habitat revealed free+occupied cells (not laser /grid_map).
         """
+        with self._sim_lock:
+            navigable, _ox, _oy = self._ensure_nav_cache_locked()
+            if self._gt_m2_cache is None:
+                self._gt_m2_cache = self._floor_area_from_navigable(navigable)
+            return float(self._gt_m2_cache), MAP_METERS_PER_PIXEL
+
+    def _compute_coverage_snapshot(self) -> Tuple[float, float, float]:
+        """Heavy coverage math; may release the sim lock during flood-fill."""
         grid, mpp, _ox, _oy = self.get_map()
         explored = float(np.count_nonzero((grid == 0) | (grid == 100))) * (mpp * mpp)
         gt_m2, _ = self.get_floor_area()
         return explored, float(gt_m2), float(mpp)
+
+    def get_coverage_stats(self) -> Tuple[float, float, float]:
+        """Return latest (explored_m2, gt_m2, mpp) without blocking on a full recalc.
+
+        A background thread continuously refreshes ``_coverage_cache``. IPC callers
+        get the last finished snapshot immediately so the accept loop stays free
+        for step/get_obs. First call may compute once if the cache is still empty.
+        """
+        cached = self._coverage_cache
+        if cached is not None:
+            return cached
+        # Cold start: one synchronous compute so callers never see zeros.
+        snap = self._compute_coverage_snapshot()
+        self._coverage_cache = snap
+        return snap
+
+    def _coverage_loop(self) -> None:
+        """Persistent worker: recalc coverage, publish cache, repeat when done."""
+        print("Coverage worker started (async cache; IPC get_coverage_stats is non-blocking)")
+        while _running and not self._coverage_stop.is_set():
+            try:
+                snap = self._compute_coverage_snapshot()
+                self._coverage_cache = snap
+            except Exception as exc:
+                print(f"Coverage worker error: {exc}", file=sys.stderr)
+            # Yield so step/get_obs can take the lock between iterations.
+            self._coverage_stop.wait(0.05)
 
 
 def _encode_obs_response(engine: HabitatEngine) -> Dict[str, Any]:
@@ -337,14 +419,14 @@ def _handle_request(engine: HabitatEngine, payload: Dict[str, Any]) -> Dict[str,
     if cmd == "get_obs_and_pose":
         # Single request so depth and privileged pose cannot diverge across IPC calls.
         try:
-            payload = _encode_obs_response(engine)
+            out = _encode_obs_response(engine)
             x, y, yaw = engine.get_pose()
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
-        payload["x"] = x
-        payload["y"] = y
-        payload["yaw_rad"] = yaw
-        return payload
+        out["x"] = x
+        out["y"] = y
+        out["yaw_rad"] = yaw
+        return out
     if cmd == "get_pose":
         try:
             x, y, yaw = engine.get_pose()

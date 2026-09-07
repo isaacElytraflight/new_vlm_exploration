@@ -6,6 +6,208 @@ Add a new dated section at the top when you work on this repo.
 
 ---
 
+## 2026-09-06 — Wall unstick on invalid Nav2 start
+
+### Symptom
+
+Robot wedged near wall → start in lethal/inflation → every NavigateToPose fails → explore marked all frontiers dead.
+
+### Fix
+
+- `wall_unstick`: clearance-to-occupied + gradient DiscreteMove recovery
+- Gate: unstick if `error_code==START_OCCUPIED (205)` **or** clearance `< unstick_min_clearance_m` (default 0.25)
+- Mark frontier dead mainly on `GOAL_OCCUPIED` / `NO_VALID_PATH` (after unstick); **do not** mark when start still invalid after unstick
+- `Nav2Navigator` surfaces `lastErrorCode()` from NavigateToPose result
+- Wired via `navigateWithUnstickRecovery` for child/batch/backtrack/return-home
+
+### Params
+
+`unstick_min_clearance_m` (0.25), `unstick_max_steps` (8)
+
+### Verify
+
+`test_wall_unstick` — 17 passed; rebuild explore_node and restart episode.
+
+---
+
+## 2026-09-06 — cmd_vel |ang|/|lin| turn-over-drive ratio
+
+### Symptom
+
+Planner path curved around wall; discrete bridge kept `FORWARD` while `ang_z≈0.47` with `lin=0.25` → Habitat `collided=1` then stuck.
+
+### Cause
+
+Linear-first `cmd_vel_to_intent` ignored angular whenever `|lin| > 0.03` (intentional fix for angular-first wiggle).
+
+### Fix
+
+`turn_over_drive_ratio` default **1.0**: if `|ang|/|lin| >= 1.0` and angular above threshold → turn; else drive. Mild RPP (~0.48) still drives; wall-hit logs (~1.5–2.0) turn. ROS param on `cmd_vel_to_discrete`.
+
+### Verify
+
+`test_cmd_vel_to_discrete.py` — 16 passed (incl. high-curvature turn + below-threshold stays forward).
+
+---
+
+## 2026-09-06 — Remove stack timing + TEMP wall-collision diag
+
+### Shipped
+
+- Removed all TEMP timing CSV instrumentation (motion / IPC / cmd_vel / nav / depth) — behavior unchanged
+- TEMP wall-collision diagnostics:
+  - `explorer_bridge/wall_collision_diag.py` → `/data/temp_wall_collision_diag.csv` (host `sim/data/`)
+  - `cmd_vel_to_discrete_node`: `dispatch` rows with cmd_vel + plan cross-track / yaw error
+  - `explorer_bridge_node`: `step` / `step_fail` rows with Habitat `collided` + pose delta; WARN on collide or no-progress move
+
+### How to reproduce
+
+1. Restart exploration episode (Python nodes pick up diag; packages rebuilt)
+2. When robot walks into a wall despite planner going around, note wall-clock time
+3. Inspect `habitat3-exploration/sim/data/temp_wall_collision_diag.csv` around that time: look for `FORWARD` dispatch with large `yaw_err_rad` / `cross_track_m`, then `step` with `collided=1` or `stuck_like`
+
+### Hypotheses to check in CSV
+
+- Discrete quantization ignores path curvature (FORWARD while yaw_err large)
+- Habitat `collided=1` ignored / still succeeding DiscreteMove
+- Map lag vs plan (plan looks free, sim collides)
+
+---
+
+## 2026-09-06 — Async coverage worker (non-blocking IPC)
+
+### Shipped
+
+- `habitat_engine.py`: background `Coverage worker` loop refreshes coverage cache continuously
+- IPC `get_coverage_stats` returns **latest cache** immediately (no 444 ms accept-loop stall)
+- Cached navmesh `get_topdown_view` + GT floor area (avoid double rasterize)
+- Reveal flood-fill runs **off** the sim lock; sim lock only for brief Habitat API access
+- Restart episode to load engine changes; re-check `temp_habitat_ipc_timing.csv` / motion CSV
+
+---
+
+## 2026-09-06 — Inflation half + full-stack TEMP timing
+
+### Shipped
+
+- Grid map `obstacle_inflation_m`: **0.10 → 0.05** (launch + mapper defaults)
+- TEMP stack timing CSVs under `/data/` (host `sim/data/`):
+  - `temp_motion_timing.csv` — DiscreteMove: ipc_step / get_obs / ros_publish
+  - `temp_habitat_ipc_timing.csv` — engine: encode vs sim_step vs handler
+  - `temp_cmdvel_timing.csv` — DiscreteMove goal RTT + interval gate
+  - `temp_nav_timing.csv` — NavigateToPose wall duration / outcome
+  - (existing) `temp_depth_timing.csv`
+
+### Note
+
+Restart episode so habitat_engine + launch inflation reload.
+
+---
+
+## 2026-09-06 — C++ depth→grid mapper (speed pass)
+
+### Shipped
+
+- Converted `explorer_bridge` to **ament_cmake + ament_cmake_python** hybrid
+- New C++ lib + node `known_pose_pc_mapper_node`:
+  - `OccupancyMap`, in-place Bresenham with **early stop on OCCUPIED**
+  - `subsample` default **8**
+  - Pose gate: integrate only if Δxy ≥ **0.25 m** or |Δyaw| ≥ **0.17 rad**
+  - TEMP timing CSV still at `/data/temp_depth_timing.csv`
+- Launch + design_doc updated; Python PC mapper entry point removed (file kept for reference)
+
+### Verify
+
+```bash
+colcon build --packages-select explorer_bridge --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
+colcon test --packages-select explorer_bridge --ctest-args -R 'test_pc_occupancy|test_pose_gate'
+# 7 + 6 gtests passed
+```
+
+### Note
+
+Build must use system Python (`-DPython3_EXECUTABLE=/usr/bin/python3`) — conda python lacks `catkin_pkg`.
+
+---
+
+## 2026-09-06 — Depth timing + stuck failsafe (1 m / 60 s, 5 min hard)
+
+### Shipped
+
+- **TEMP depth→grid stage timing** in `known_pose_pc_mapper_node.py` + `pc_to_occupancy.py`
+  - Stages: decode, signature, skip_check, project_prepare, mark_occupied, bresenham_carve, publish_inflate, publish_tolist
+  - Throttled ROS log every ~2 s with prefix `TEMP_DEPTH_TIMING` (mean/max ms, skip vs integrate, avg prepared rays, grid size)
+  - Delete after profiling — do **not** treat as permanent API
+- **Stuck failsafe policy** via `stuck_progress.hpp` (`StuckProgressTracker` + constants)
+  - Hard total timeout: **120 s → 300 s**
+  - Stuck distance: **0.1 m → 1.0 m** (still 60 s window)
+  - Wired through `Nav2Navigator` + `explore_node`; Nav2 `required_movement_radius: 1.0`
+
+### Verify
+
+- `colcon build --packages-select explorer_mission` OK
+- gtest `test_stuck_progress`: 8 passed
+- pytest `test_nav2_params.py`: 18 passed; `test_pc_to_occupancy.py`: 12 passed
+
+### Next
+
+- Run an episode and read `TEMP_DEPTH_TIMING` logs to decide downsample vs GPU (or publish path) before adding a speedup config
+
+---
+
+## 2026-08-31 — Goal B v1: batch experiment CLI + SQLite
+
+### Shipped
+
+- **`experiments/`** — YAML matrix, SQLite (`sim/data/experiments/results.sqlite`), revisit histogram, aggregate CLI
+- **`run_experiment.py`** — host orchestrator (docker tmux start/stop, profile apply, metrics collect)
+- **`experiment_collect.py`** — container waiter on `exploration/status`, trajectory + coverage time series
+- **`apply_exploration_profile.sh`** — VLM-default vs greedy (lowest-first) profiles
+- **`HABITAT_SPAWN_SEED`** in `habitat_engine.py` for repeatable spawns
+- 22 host pytest tests green under `experiments/tests/`
+
+### Verify
+
+```bash
+cd habitat3-exploration
+python experiments/run_experiment.py experiments/configs/smoke.yaml --dry-run
+python -m pytest experiments/tests/ -q
+# Full matrix (requires habitat3-sim running):
+python experiments/run_experiment.py experiments/configs/smoke.yaml
+python experiments/aggregate_results.py smoke_vlm_vs_greedy_2026q3
+```
+
+### Open
+
+- 90° privileged FOV mode; plot export; Elytra "Start ablation" button
+
+---
+
+## 2026-08-28 — Return-home guard (cascade frontier exhaustion)
+
+### Shipped
+
+- **`ReturnHomeGuard`** (`return_home_guard.hpp`) + gtests — blocks sibling frontier selection after child nav failure until return to scan node succeeds.
+- **`explore_node`**: `returnToScanNodeWithRetry` (default 20 attempts); batch + DFS child paths use guard; only failed child marked `fully_explored`.
+- Elytra Bridge restarted; `habitat3-sim` container brought up for episode watch.
+
+### Verify
+
+```bash
+docker exec habitat3-sim bash -lc \
+  'source /opt/ros/jazzy/setup.bash && source /opt/explorer_workspace/ros_workspace/install/setup.bash && \
+   cd /opt/explorer_workspace/ros_workspace && colcon test --packages-select explorer_mission'
+```
+
+Episode: Connect Elytra → Run Exploration Episode → confirm nav failures no longer wipe sibling frontiers in one loop.
+
+### Next (FUTURE_GOALS)
+
+- Goal A gate: episode map quality check with PC mapper on lower-floor scene.
+- Goal B: SQLite batch orchestrator (after mapping gate).
+
+---
+
 ## 2026-08-26/27 — Session closeout: Goal A PC map + Nav2 fail-fast + open issues
 
 ### Shipped this session

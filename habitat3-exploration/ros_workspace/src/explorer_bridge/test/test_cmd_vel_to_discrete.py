@@ -42,6 +42,7 @@ def test_cmd_vel_forward_positive():
 
 def test_cmd_vel_drive_with_curvature_prefers_forward_positive():
     """RPP path follow: linear + mild angular must step forward, not spin-jitter."""
+    # |ang|/|lin| = 0.12/0.25 = 0.48 < default turn_over_drive_ratio (1.0)
     intent = cmd_vel_to_intent(0.25, 0.12)
     assert intent is not None
     assert intent.direction == DiscreteMove.Goal.FORWARD
@@ -53,6 +54,22 @@ def test_cmd_vel_curvature_must_not_force_turn_negative():
     assert intent is not None
     assert intent.direction != DiscreteMove.Goal.TURN_LEFT
     assert intent.direction != DiscreteMove.Goal.TURN_RIGHT
+
+
+def test_cmd_vel_high_curvature_prefers_turn_positive():
+    """Wall-hit mode: strong |ang|/|lin| must turn instead of driving into obstacles."""
+    # Observed stuck case: lin=0.25, ang≈0.47 → ratio ≈ 1.89
+    intent = cmd_vel_to_intent(0.25, 0.47)
+    assert intent is not None
+    assert intent.direction == DiscreteMove.Goal.TURN_LEFT
+
+
+def test_cmd_vel_ratio_below_threshold_stays_forward_negative():
+    """Negative: ratio just under threshold must not flip back to angular-first."""
+    # 0.24/0.25 = 0.96 < 1.0 → still drive
+    intent = cmd_vel_to_intent(0.25, 0.24)
+    assert intent is not None
+    assert intent.direction == DiscreteMove.Goal.FORWARD
 
 
 def test_cmd_vel_below_threshold_negative():

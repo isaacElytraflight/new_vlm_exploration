@@ -216,6 +216,10 @@ def test_inflate_occupied_zero_radius_negative():
     assert out is not data
 
 
+def test_inflation_radius_cells_5cm_at_5cm_res_positive():
+    assert inflation_radius_cells(0.05, 0.05) == 1
+
+
 def test_inflation_radius_cells_10cm_at_5cm_res_positive():
     assert inflation_radius_cells(0.05, 0.10) == 2
 

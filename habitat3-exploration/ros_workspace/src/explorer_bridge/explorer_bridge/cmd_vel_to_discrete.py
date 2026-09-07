@@ -13,6 +13,10 @@ class CmdVelThresholds:
     # Pure rotate-in-place (linear≈0): accept small angular so Nav2 can align.
     angular_threshold: float = 0.05
     linear_threshold: float = 0.03
+    # When both lin and ang are significant: |ang|/|lin| above this → turn
+    # (sharp curve / wall-avoid), else drive (mild RPP path curvature).
+    # Units: (rad/s) / (m/s). Wall-hit logs had ~1.5–2.0; mild follow ~0.5.
+    turn_over_drive_ratio: float = 1.0
     # Once turning, ignore opposite angular below this — BUT max_turn_steps_before_flip
     # caps long-way spins when path updates flip the short direction.
     turn_flip_angular_threshold: float = 0.2
@@ -27,6 +31,26 @@ class DiscreteMoveIntent:
     steps: int = 1
 
 
+def _turn_intent(
+    angular_z: float,
+    t: CmdVelThresholds,
+    last_turn_direction: int | None,
+    consecutive_turn_steps: int,
+) -> DiscreteMoveIntent:
+    direction = (
+        DiscreteMove.Goal.TURN_LEFT if angular_z > 0 else DiscreteMove.Goal.TURN_RIGHT
+    )
+    allow_weak_flip = consecutive_turn_steps >= t.max_turn_steps_before_flip
+    if (
+        last_turn_direction is not None
+        and direction != last_turn_direction
+        and abs(angular_z) < t.turn_flip_angular_threshold
+        and not allow_weak_flip
+    ):
+        direction = last_turn_direction
+    return DiscreteMoveIntent(direction=direction, steps=1)
+
+
 def cmd_vel_to_intent(
     linear_x: float,
     angular_z: float,
@@ -36,34 +60,33 @@ def cmd_vel_to_intent(
 ) -> Optional[DiscreteMoveIntent]:
     """Return a single discrete step intent, or None if below thresholds.
 
-    Prefer **drive** when linear is significant. RPP path following always mixes
-    a little angular with forward velocity; angular-first priority caused endless
-    10° turns until nearly perfectly aligned (Habitat jitter).
-    Rotate-in-place only when linear is below threshold.
+    Prefer **drive** when linear is significant and curvature is mild.
+    If |angular_z|/|linear_x| >= turn_over_drive_ratio, prefer **turn** so
+    sharp RPP arcs (wall-around) are not quantized into straight collisions.
+    Rotate-in-place when linear is below threshold.
 
     When already turning, require |angular_z| >= turn_flip_angular_threshold to
     reverse direction — unless we have already committed max_turn_steps_before_flip
     (≈180°), in which case allow a weak opposite to take the short way.
     """
     t = thresholds or CmdVelThresholds()
-    if abs(linear_x) > t.linear_threshold:
+    abs_lin = abs(linear_x)
+    abs_ang = abs(angular_z)
+
+    if abs_lin > t.linear_threshold:
+        prefer_turn = (
+            abs_ang > t.angular_threshold
+            and (abs_ang / abs_lin) >= t.turn_over_drive_ratio
+        )
+        if prefer_turn:
+            return _turn_intent(angular_z, t, last_turn_direction, consecutive_turn_steps)
         direction = (
             DiscreteMove.Goal.FORWARD if linear_x > 0 else DiscreteMove.Goal.BACKWARD
         )
         return DiscreteMoveIntent(direction=direction, steps=1)
-    if abs(angular_z) > t.angular_threshold:
-        direction = (
-            DiscreteMove.Goal.TURN_LEFT if angular_z > 0 else DiscreteMove.Goal.TURN_RIGHT
-        )
-        allow_weak_flip = consecutive_turn_steps >= t.max_turn_steps_before_flip
-        if (
-            last_turn_direction is not None
-            and direction != last_turn_direction
-            and abs(angular_z) < t.turn_flip_angular_threshold
-            and not allow_weak_flip
-        ):
-            direction = last_turn_direction
-        return DiscreteMoveIntent(direction=direction, steps=1)
+
+    if abs_ang > t.angular_threshold:
+        return _turn_intent(angular_z, t, last_turn_direction, consecutive_turn_steps)
     return None
 
 

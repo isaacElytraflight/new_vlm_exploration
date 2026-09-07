@@ -55,7 +55,7 @@ class KnownPoseMapperNode(Node):
         self.declare_parameter("odom_cache_size", 2048)
         self.declare_parameter("max_stamp_skew_sec", 0.0)
         self.declare_parameter("pending_scan_limit", 128)
-        self.declare_parameter("obstacle_inflation_m", 0.10)
+        self.declare_parameter("obstacle_inflation_m", 0.05)
 
         scan_topic = str(self.get_parameter("scan_topic").value)
         odom_topic = str(self.get_parameter("odom_topic").value)

@@ -29,6 +29,7 @@ from explorer_bridge.habitat_driver import HabitatDriver
 from explorer_bridge.hardware_driver import HardwareDriver
 from explorer_bridge.image_utils import depth_array_to_image, rgb_array_to_image, write_jpeg_frame
 from explorer_bridge.mock_driver import MockHabitatDriver
+from explorer_bridge.wall_collision_diag import log_event
 
 DIRECTION_TO_ACTION = {
     DiscreteMove.Goal.FORWARD: "move_forward",
@@ -147,6 +148,10 @@ class ExplorerBridgeNode(Node):
         self._driver_ready = True
         self.get_logger().info(
             f"Explorer bridge started (backend={backend}, publish={publish_hz:.1f} Hz)"
+        )
+        # TEMP: wall collision diag
+        self.get_logger().info(
+            "TEMP_WALL_COLLISION_DIAG writing /data/temp_wall_collision_diag.csv"
         )
 
     def _goal_callback(self, goal_request: DiscreteMove.Goal) -> GoalResponse:
@@ -356,17 +361,71 @@ class ExplorerBridgeNode(Node):
         try:
             for _ in range(goal.steps):
                 with self._io_lock:
+                    pose_before = None
+                    try:
+                        pose_before = self._driver.get_pose()
+                    except Exception:
+                        pass
                     step_result = self._driver.step(action, 1)
                     if not step_result.success:
                         result.success = False
                         result.collided = step_result.collided
                         result.message = step_result.message
+                        # TEMP: wall collision diag
+                        log_event(
+                            "step_fail",
+                            action=action,
+                            collided=bool(step_result.collided),
+                            note=str(step_result.message or ""),
+                        )
+                        if step_result.collided:
+                            self.get_logger().warn(
+                                f"TEMP_WALL_COLLISION DiscreteMove failed collided "
+                                f"action={action} msg={step_result.message}"
+                            )
                         goal_handle.abort()
                         return result
                     completed += step_result.steps_completed
                     collided = collided or step_result.collided
                     # Same lock: depth + odom share one pose (prevents spiral maps).
                     self._publish_sensor_data_locked()
+                    pose_after = None
+                    try:
+                        pose_after = self._driver.get_pose()
+                    except Exception:
+                        pass
+                    # TEMP: wall collision diag — pose delta + Habitat collided flag
+                    dx = dy = dist = None
+                    px = py = yaw = None
+                    if pose_before is not None and pose_after is not None:
+                        dx = pose_after.x - pose_before.x
+                        dy = pose_after.y - pose_before.y
+                        dist = (dx * dx + dy * dy) ** 0.5
+                        px, py, yaw = pose_after.x, pose_after.y, pose_after.yaw_rad
+                    elif pose_after is not None:
+                        px, py, yaw = pose_after.x, pose_after.y, pose_after.yaw_rad
+                    log_event(
+                        "step",
+                        action=action,
+                        collided=bool(step_result.collided),
+                        pose_x=px,
+                        pose_y=py,
+                        yaw_rad=yaw,
+                        dx=dx,
+                        dy=dy,
+                        dist_m=dist,
+                        note="stuck_like" if (dist is not None and dist < 0.02 and action.startswith("move")) else "",
+                    )
+                    if step_result.collided:
+                        self.get_logger().warn(
+                            f"TEMP_WALL_COLLISION Habitat collided=1 action={action} "
+                            f"pose=({px},{py}) dist={dist}"
+                        )
+                    elif dist is not None and dist < 0.02 and action.startswith("move"):
+                        self.get_logger().warn(
+                            f"TEMP_WALL_COLLISION move made almost no progress "
+                            f"action={action} dist={dist:.4f} pose=({px},{py})"
+                        )
                 feedback.steps_completed = completed
                 goal_handle.publish_feedback(feedback)
 

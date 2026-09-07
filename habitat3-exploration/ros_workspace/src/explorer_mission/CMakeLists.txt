@@ -28,6 +28,7 @@ set(EXPLORER_MISSION_LIBS
   frontier_tree
   discrete_navigator
   nav2_navigator
+  wall_unstick
 )
 
 add_library(frontier_detection src/frontier_detection.cpp)
@@ -56,6 +57,13 @@ target_include_directories(nav2_navigator PUBLIC
 ament_target_dependencies(nav2_navigator
   rclcpp rclcpp_action nav2_msgs tf2_geometry_msgs)
 
+add_library(wall_unstick src/wall_unstick.cpp)
+target_include_directories(wall_unstick PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+ament_target_dependencies(wall_unstick nav_msgs)
+target_link_libraries(wall_unstick ${OpenCV_LIBS})
+
 set(node_targets
   actions_node
   frontier_vlm_client_node
@@ -72,7 +80,7 @@ ament_target_dependencies(frontier_vlm_client_node
   rclcpp rclcpp_action sensor_msgs std_msgs explorer_msgs)
 
 add_executable(explore_node src/explore_node.cpp)
-target_link_libraries(explore_node frontier_detection frontier_tree discrete_navigator nav2_navigator)
+target_link_libraries(explore_node frontier_detection frontier_tree discrete_navigator nav2_navigator wall_unstick)
 ament_target_dependencies(explore_node
   rclcpp rclcpp_action tf2_ros nav_msgs sensor_msgs std_msgs geometry_msgs
   diagnostic_msgs explorer_msgs)
@@ -141,6 +149,17 @@ if(BUILD_TESTING)
   ament_add_gtest(test_discrete_navigator test/test_discrete_navigator.cpp)
   target_link_libraries(test_discrete_navigator discrete_navigator)
   target_include_directories(test_discrete_navigator PUBLIC include)
+
+  ament_add_gtest(test_return_home_guard test/test_return_home_guard.cpp)
+  target_include_directories(test_return_home_guard PUBLIC include)
+
+  ament_add_gtest(test_stuck_progress test/test_stuck_progress.cpp)
+  target_include_directories(test_stuck_progress PUBLIC include)
+
+  ament_add_gtest(test_wall_unstick test/test_wall_unstick.cpp)
+  target_link_libraries(test_wall_unstick wall_unstick)
+  target_include_directories(test_wall_unstick PUBLIC include)
+  ament_target_dependencies(test_wall_unstick nav_msgs)
 endif()
 
 ament_package()

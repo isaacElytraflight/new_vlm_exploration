@@ -78,22 +78,36 @@ def test_xy_goal_tolerance_at_least_one_step_positive():
     assert params["general_goal_checker"]["xy_goal_tolerance"] >= 0.25
 
 
+def test_progress_checker_one_meter_radius_positive():
+    """Nav2 progress checker matches explore stuck policy (1 m / 60 s)."""
+    params = _controller_params()
+    pc = params["progress_checker"]
+    assert pc["required_movement_radius"] == pytest.approx(1.0)
+    assert pc["movement_time_allowance"] == pytest.approx(60.0)
+
+
+def test_progress_checker_not_ten_cm_negative():
+    """Regression: 0.1 m radius aborted still-moving frontier goals too early."""
+    params = _controller_params()
+    assert params["progress_checker"]["required_movement_radius"] > 0.5
+
+
 def _planner_params():
     with PARAMS.open(encoding="utf-8") as f:
         data = yaml.safe_load(f)
     return data["planner_server"]["ros__parameters"]
 
 
-def test_allow_unknown_false_positive():
-    """Unknown cells must be lethal for planning (no jailbreak through unexplored)."""
+def test_allow_unknown_true_positive():
+    """Paths may traverse unknown cells to reach frontier goals on map edges."""
     params = _planner_params()
-    assert params["GridBased"]["allow_unknown"] is False
+    assert params["GridBased"]["allow_unknown"] is True
 
 
-def test_allow_unknown_true_rejected_negative():
-    """Regression: allow_unknown true let Navfn cut through unknown behind walls."""
+def test_allow_unknown_false_rejected_negative():
+    """Regression: allow_unknown false blocked plans to free↔unknown frontier midpoints."""
     params = _planner_params()
-    assert params["GridBased"]["allow_unknown"] is not True
+    assert params["GridBased"]["allow_unknown"] is not False
 
 
 def test_planner_goal_tolerance_one_meter_positive():
@@ -106,6 +120,26 @@ def test_planner_goal_tolerance_not_half_meter_negative():
     """Regression: 0.5 m was too tight for free↔unknown frontier midpoints."""
     params = _planner_params()
     assert params["GridBased"]["tolerance"] > 0.5
+
+
+def _costmap_inflation(name: str) -> float:
+    with PARAMS.open(encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    return float(
+        data[name][name]["ros__parameters"]["inflation_layer"]["inflation_radius"]
+    )
+
+
+def test_inflation_radius_15cm_positive():
+    """Tighter inflation so narrow free corridors remain plannable."""
+    assert _costmap_inflation("local_costmap") == pytest.approx(0.15)
+    assert _costmap_inflation("global_costmap") == pytest.approx(0.15)
+
+
+def test_inflation_radius_not_30cm_negative():
+    """Regression: 0.30 m inflation blocked return-home plans through tight free space."""
+    assert _costmap_inflation("local_costmap") < 0.30
+    assert _costmap_inflation("global_costmap") < 0.30
 
 
 def _bt_navigator_params():

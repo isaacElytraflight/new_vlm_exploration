@@ -1,6 +1,8 @@
 #include "explorer_mission/nav2_navigator.hpp"
 
+#include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <future>
 
 #include <nav2_msgs/action/navigate_to_pose.hpp>
@@ -38,8 +40,10 @@ bool Nav2Navigator::navigateToPose(
   const std::function<bool()> & tick,
   double goal_accept_radius_m)
 {
+  // stuck_distance_m is applied in noteProgress via the caller's tick.
   (void)stuck_distance_m;
   last_error_.clear();
+  last_error_code_ = 0;
   resetProgress();
 
   if (!client_->wait_for_action_server(std::chrono::seconds(0))) {
@@ -112,11 +116,20 @@ bool Nav2Navigator::navigateToPose(
 
   const auto wrapped = result_future.get();
   active_goal_handle_.reset();
+  if (wrapped.result) {
+    last_error_code_ = wrapped.result->error_code;
+    if (!wrapped.result->error_msg.empty()) {
+      last_error_ = wrapped.result->error_msg;
+    }
+  }
   if (wrapped.code != rclcpp_action::ResultCode::SUCCEEDED) {
-    last_error_ = "NavigateToPose failed with code " +
-      std::to_string(static_cast<int>(wrapped.code));
+    if (last_error_.empty()) {
+      last_error_ = "NavigateToPose failed with code " +
+        std::to_string(static_cast<int>(wrapped.code));
+    }
     return false;
   }
+  last_error_code_ = 0;
   return true;
 }
 
@@ -126,34 +139,17 @@ void Nav2Navigator::noteProgress(
   current_x_ = x;
   current_y_ = y;
   have_current_pose_ = true;
-
-  if (!have_progress_anchor_) {
-    progress_x_ = x;
-    progress_y_ = y;
-    have_progress_anchor_ = true;
-    last_progress_time_ = node_->now();
-    return;
-  }
-  const double dx = x - progress_x_;
-  const double dy = y - progress_y_;
-  if (std::hypot(dx, dy) >= stuck_distance_m) {
-    progress_x_ = x;
-    progress_y_ = y;
-    last_progress_time_ = node_->now();
-  }
+  stuck_progress_.noteProgress(x, y, stuck_distance_m, node_->now().seconds());
 }
 
 bool Nav2Navigator::isStuck(double stuck_timeout_s) const
 {
-  if (!have_progress_anchor_) {
-    return false;
-  }
-  return (node_->now() - last_progress_time_).seconds() > stuck_timeout_s;
+  return stuck_progress_.isStuck(stuck_timeout_s, node_->now().seconds());
 }
 
 void Nav2Navigator::resetProgress()
 {
-  have_progress_anchor_ = false;
+  stuck_progress_.reset();
   have_current_pose_ = false;
 }
 

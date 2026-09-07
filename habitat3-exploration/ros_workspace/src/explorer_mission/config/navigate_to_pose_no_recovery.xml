@@ -1,7 +1,7 @@
 <!--
   NavigateToPose without Spin/BackUp/Wait recovery.
 
-  If ComputePathToPose fails (unreachable frontier under allow_unknown=false),
+  If ComputePathToPose fails (goal unreachable even with allow_unknown=true),
   the tree fails immediately so explore_node can mark the frontier dead and
   pick the next child — no costmap-clear / pirouette / reverse thrash.
 -->
