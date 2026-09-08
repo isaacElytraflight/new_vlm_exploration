@@ -40,14 +40,50 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Expand matrix and print planned runs without executing docker",
     )
+    resume_group = parser.add_mutually_exclusive_group()
+    resume_group.add_argument(
+        "--resume",
+        dest="resume",
+        action="store_true",
+        default=True,
+        help="Skip completed runs and resume incomplete experiment (default)",
+    )
+    resume_group.add_argument(
+        "--fresh",
+        dest="fresh",
+        action="store_true",
+        help="Ignore prior completions and start a new campaign",
+    )
+    parser.add_argument(
+        "--experiment-id",
+        type=str,
+        default=None,
+        help="Override experiment_id from the YAML (used for fresh campaign isolation)",
+    )
+    parser.add_argument(
+        "--experiment-id-suffix",
+        type=str,
+        default=None,
+        help="Append to YAML experiment_id (e.g. _20260907_153045 for a fresh campaign)",
+    )
     args = parser.parse_args(argv)
 
     config = ExperimentConfig.from_yaml(args.config)
+    if args.experiment_id:
+        config.experiment_id = str(args.experiment_id).strip()
+    elif args.experiment_id_suffix:
+        suffix = str(args.experiment_id_suffix).strip()
+        if suffix and not suffix.startswith("_"):
+            suffix = "_" + suffix
+        config.experiment_id = f"{config.experiment_id}{suffix}"
+
     orch = ExperimentOrchestrator(
         config,
         project_root=args.project_root.resolve(),
         dry_run=args.dry_run,
         progress_file=args.progress_file,
+        resume=not bool(args.fresh),
+        fresh=bool(args.fresh),
     )
     results = orch.run_all()
     failed = [r for r in results if r.status not in {"completed", "dry_run"}]

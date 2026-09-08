@@ -80,30 +80,42 @@ UnstickDecision decideNavFailureRecovery(
   uint16_t error_code,
   double clearance_m,
   double min_clearance_m,
-  bool already_unstuck)
+  int unstick_attempts,
+  int max_unstick_attempts)
 {
+  const int max_attempts = std::max(0, max_unstick_attempts);
+  const int attempts = std::max(0, unstick_attempts);
   const bool low_clearance =
     std::isfinite(clearance_m) && clearance_m < min_clearance_m;
   const bool start_invalid =
     error_code == kNavErrorStartOccupied || low_clearance;
   const bool goal_invalid = error_code == kNavErrorGoalOccupied;
   const bool no_path = error_code == kNavErrorNoValidPath;
+  // Start occupied / low clearance / no path: thrash (back/forward) before marking.
+  const bool recoverable = start_invalid || no_path;
 
   if (goal_invalid) {
     return UnstickDecision{false, true};
   }
-  if (start_invalid && !already_unstuck) {
+  if (recoverable && attempts < max_attempts) {
     return UnstickDecision{true, false};
   }
-  if (no_path) {
-    // Unreachable path (OK start, or still unreachable after unstick) → mark.
+  if (recoverable && attempts >= max_attempts) {
     return UnstickDecision{false, true};
-  }
-  if (start_invalid && already_unstuck) {
-    return UnstickDecision{false, false};
   }
   // Stuck / timeout / unknown: keep prior tree-progress behavior (mark).
   return UnstickDecision{false, true};
+}
+
+UnstickThrashMotion unstickThrashMotion(int attempt_index)
+{
+  const int idx = std::max(0, attempt_index);
+  UnstickThrashMotion motion;
+  // Even attempts: reverse (helps when facing into occlusion).
+  // Odd attempts: forward (helps when back is against the wall).
+  motion.direction = (idx % 2 == 0) ? kUnstickBackward : kUnstickForward;
+  motion.steps = (idx / 2) + 1;
+  return motion;
 }
 
 std::optional<double> clearanceToOccupiedM(
@@ -158,7 +170,8 @@ std::optional<cv::Point2f> clearanceGradientDir(
 std::optional<DiscreteUnstickStep> nextUnstickStep(
   double robot_yaw_rad,
   const cv::Point2f & gradient_dir_unit,
-  double align_tol_rad)
+  double align_tol_rad,
+  int forward_steps)
 {
   const float n = std::hypot(gradient_dir_unit.x, gradient_dir_unit.y);
   if (n < 1e-3f) {
@@ -167,11 +180,12 @@ std::optional<DiscreteUnstickStep> nextUnstickStep(
   const double desired = std::atan2(gradient_dir_unit.y, gradient_dir_unit.x);
   const double err = normalizeAngle(desired - robot_yaw_rad);
   DiscreteUnstickStep step;
-  step.steps = 1;
   if (std::fabs(err) > align_tol_rad) {
     step.direction = err > 0.0 ? kUnstickTurnLeft : kUnstickTurnRight;
+    step.steps = 1;
   } else {
     step.direction = kUnstickForward;
+    step.steps = std::max(1, forward_steps);
   }
   return step;
 }

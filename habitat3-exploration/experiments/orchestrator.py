@@ -7,9 +7,8 @@ import shlex
 import subprocess
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from experiments.config import (
     ExperimentConfig,
@@ -19,8 +18,33 @@ from experiments.config import (
     run_id_for,
 )
 from experiments.db import ExperimentDB, utc_now_iso
+from experiments.media_cleanup import cleanup_run_media
 from experiments.metrics import compute_revisit_bins, coverage_ratio
+from experiments.package import write_run_package
 from experiments.progress import ProgressWriter
+from experiments.state import ExperimentState, config_fingerprint
+
+
+def build_tmux_episode_start_cmd(env_file: str) -> str:
+    """Shell snippet to (re)create the habitat tmux session running start_sim.sh.
+
+    Killing the last tmux session can tear down the server; without start-server
+    + a short settle, `new-session` races and fails with
+    "server exited unexpectedly".
+    """
+    return (
+        "tmux kill-session -t habitat 2>/dev/null || true; "
+        "sleep 0.5; "
+        "tmux start-server; "
+        "tmux new-session -d -s habitat "
+        f"'set -a && source {shlex.quote(env_file)} && set +a && "
+        f"bash /workspace/scripts/start_sim.sh'"
+    )
+
+
+def tmux_start_looks_ok(*, new_session_rc: int, has_session_rc: int) -> bool:
+    """True when new-session succeeded and `tmux has-session -t habitat` agrees."""
+    return int(new_session_rc) == 0 and int(has_session_rc) == 0
 
 
 @dataclass
@@ -38,49 +62,141 @@ class ExperimentOrchestrator:
         project_root: Path,
         dry_run: bool = False,
         progress_file: Path | str | None = None,
+        resume: bool = True,
+        fresh: bool = False,
     ) -> None:
         self.config = config
         self.project_root = project_root.resolve()
         self.dry_run = dry_run
+        self.resume = bool(resume) and not bool(fresh)
+        self.fresh = bool(fresh)
         self.progress_file = Path(progress_file) if progress_file else None
         self.progress = ProgressWriter(self.progress_file)
         self.db_path = self.project_root / config.artifact_root / "results.sqlite"
         self.db = ExperimentDB(self.db_path)
         self.db.initialize()
         self._specs = list(expand_matrix(config))
+        self._exp_dir = (
+            self.project_root / config.artifact_root / config.experiment_id
+        )
+        self._exp_dir.mkdir(parents=True, exist_ok=True)
+        self._state = ExperimentState(self._exp_dir / "experiment_state.json")
+        self._fingerprint = config_fingerprint(
+            json.dumps(
+                {
+                    "experiment_id": config.experiment_id,
+                    "algorithms": config.algorithms,
+                    "scenes": config.scenes,
+                    "seeds": config.seeds,
+                    "n_runs_per_cell": config.n_runs_per_cell,
+                    "timeout_s": config.timeout_s,
+                    "eval": {
+                        "fov_deg": config.eval.fov_deg,
+                        "reveal_radius_m": config.eval.reveal_radius_m,
+                    },
+                },
+                sort_keys=True,
+            )
+        )
+
+    def _completed_ids(self) -> Set[str]:
+        completed: Set[str] = set()
+        if not self.resume:
+            return completed
+        completed.update(self.db.list_completed_run_ids(self.config.experiment_id))
+        completed.update(self._state.completed_ids())
+        return completed
 
     def run_all(self) -> List[OrchestratorResult]:
         total = len(self._specs)
+        if self.fresh:
+            self._state.load_or_create(
+                experiment_id=self.config.experiment_id,
+                total_runs=total,
+                fingerprint=self._fingerprint,
+                fresh=True,
+            )
+        else:
+            self._state.load_or_create(
+                experiment_id=self.config.experiment_id,
+                total_runs=total,
+                fingerprint=self._fingerprint,
+                fresh=False,
+            )
+
+        interrupted = self.db.mark_running_interrupted(self.config.experiment_id)
+        for rid in interrupted:
+            self._state.set_interrupted(rid)
+
+        completed_ids = self._completed_ids()
+        pending = [s for s in self._specs if run_id_for(s) not in completed_ids]
+        completed_prior = total - len(pending)
+        resumed = self.resume and completed_prior > 0
+
         self.progress.update(
             experiment_id=self.config.experiment_id,
-            count=0,
+            count=completed_prior,
             total=total,
-            percent=0,
+            percent=int(round(100.0 * completed_prior / total)) if total else 0,
             step="starting",
-            detail=f"Starting ablation ({total} run(s)).",
+            detail=(
+                f"Resuming {completed_prior}/{total}."
+                if resumed
+                else f"Starting ablation ({total} run(s))."
+            ),
             complete=False,
             cancel_requested=False,
+            completed_prior=completed_prior,
+            remaining=len(pending),
+            current_index=completed_prior,
+            resumed=resumed,
         )
+
         results: List[OrchestratorResult] = []
-        for index, spec in enumerate(self._specs, start=1):
+        # Count already-completed cells as successes for the summary.
+        for run_id in sorted(completed_ids):
+            if any(run_id_for(s) == run_id for s in self._specs):
+                results.append(OrchestratorResult(run_id=run_id, status="completed"))
+
+        done_count = completed_prior
+        for offset, spec in enumerate(pending):
             if self.progress.cancel_requested():
                 self.progress.update(
                     step="cancelled",
                     detail="Ablation cancelled before next run.",
                     complete=True,
+                    completed_prior=completed_prior,
+                    remaining=len(pending) - offset,
+                    current_index=done_count,
+                    resumed=resumed,
                 )
                 break
-            results.append(self.run_one(spec, index=index, total=total))
+            index = done_count + 1
+            result = self.run_one(spec, index=index, total=total, resumed=resumed)
+            results.append(result)
+            done_count = index
+            remaining = max(0, total - done_count)
+            self.progress.update(
+                completed_prior=completed_prior,
+                remaining=remaining,
+                current_index=done_count,
+                resumed=resumed,
+            )
+
         failed = [r for r in results if r.status not in {"completed", "dry_run"}]
         self.progress.update(
-            count=len(results),
+            count=done_count,
             total=total,
-            percent=100,
+            percent=100 if done_count >= total else int(round(100.0 * done_count / total)),
             step="complete" if not failed else "finished_with_errors",
             detail=(
-                f"Finished {len(results)}/{total} run(s); failed={len(failed)}."
+                f"Finished {done_count}/{total} run(s); failed={len(failed)}."
             ),
             complete=True,
+            completed_prior=completed_prior,
+            remaining=max(0, total - done_count),
+            current_index=done_count,
+            resumed=resumed,
         )
         return results
 
@@ -93,6 +209,8 @@ class ExperimentOrchestrator:
         step: str,
         detail: str,
         phase: str = "",
+        resumed: bool = False,
+        completed_prior: int = 0,
     ) -> None:
         run_label = (
             f"Run {index}/{total} — {spec.algorithm_id} @ {spec.scene_id} seed={spec.seed}"
@@ -113,13 +231,25 @@ class ExperimentOrchestrator:
             seed=spec.seed,
             phase=phase,
             complete=False,
+            completed_prior=completed_prior,
+            remaining=max(0, total - (index - 1)),
+            current_index=max(0, index - 1),
+            resumed=resumed,
         )
 
-    def run_one(self, spec: RunSpec, *, index: int = 1, total: int = 1) -> OrchestratorResult:
+    def run_one(
+        self,
+        spec: RunSpec,
+        *,
+        index: int = 1,
+        total: int = 1,
+        resumed: bool = False,
+    ) -> OrchestratorResult:
         run_id = run_id_for(spec)
         artifact_dir = self.project_root / spec.artifact_root / spec.experiment_id / run_id
         artifact_dir.mkdir(parents=True, exist_ok=True)
         started_at = utc_now_iso()
+        completed_prior = max(0, index - 1)
 
         if self.dry_run:
             print(f"[dry-run] would execute {run_id}")
@@ -131,7 +261,10 @@ class ExperimentOrchestrator:
             spec=spec,
             step="recording_run",
             detail="writing SQLite row",
+            resumed=resumed,
+            completed_prior=completed_prior,
         )
+        self._state.set_interrupted(run_id)
 
         self.db.insert_run_start(
             run_id=run_id,
@@ -148,35 +281,103 @@ class ExperimentOrchestrator:
         status = "error"
         error_message: Optional[str] = None
         payload: Dict[str, Any] = {}
-        progress_file = (
-            self.progress.path.parent / f".episode_progress_{run_id}.json"
-            if self.progress.path
-            else None
-        )
+        # Keep episode progress inside the run package (not experiments/ root).
+        progress_file = artifact_dir / ".episode_progress.json"
+        stop_flag = artifact_dir / ".collectors_stop"
 
         try:
-            self._report(index=index, total=total, spec=spec, step="prepare_scene", detail="setting scene + spawn seed")
+            if stop_flag.exists():
+                stop_flag.unlink()
+            self._report(
+                index=index,
+                total=total,
+                spec=spec,
+                step="prepare_scene",
+                detail="setting scene + spawn seed",
+                resumed=resumed,
+                completed_prior=completed_prior,
+            )
             self._prepare_scene(spec)
-            self._report(index=index, total=total, spec=spec, step="start_episode", detail="launching ROS + Habitat stack")
+            self._report(
+                index=index,
+                total=total,
+                spec=spec,
+                step="start_episode",
+                detail="launching ROS + Habitat stack",
+                resumed=resumed,
+                completed_prior=completed_prior,
+            )
             self._start_episode(spec)
-            self._report(index=index, total=total, spec=spec, step="wait_explore_node", detail="waiting for /explore")
-            self._wait_for_explore_node(spec, index=index, total=total)
-            self._report(index=index, total=total, spec=spec, step="apply_profile", detail=spec.profile.id)
+            self._report(
+                index=index,
+                total=total,
+                spec=spec,
+                step="wait_explore_node",
+                detail="waiting for /explore",
+                resumed=resumed,
+                completed_prior=completed_prior,
+            )
+            self._wait_for_explore_node(
+                spec, index=index, total=total, resumed=resumed, completed_prior=completed_prior
+            )
+            self._report(
+                index=index,
+                total=total,
+                spec=spec,
+                step="apply_profile",
+                detail=spec.profile.id,
+                resumed=resumed,
+                completed_prior=completed_prior,
+            )
             self._apply_profile(spec)
-            self._report(index=index, total=total, spec=spec, step="collect_metrics", detail="episode running", phase="starting")
+            self._start_sidecar_collectors(spec, artifact_dir, stop_flag)
+            self._report(
+                index=index,
+                total=total,
+                spec=spec,
+                step="collect_metrics",
+                detail="episode running",
+                phase="starting",
+                resumed=resumed,
+                completed_prior=completed_prior,
+            )
             payload = self._collect_metrics(spec, metrics_path, progress_file=progress_file)
             status = str(payload.get("status", "error"))
             error_message = payload.get("error_message")
+            if self.progress.cancel_requested() and status == "completed":
+                # rare: completed as cancel landed
+                pass
         except Exception as exc:  # noqa: BLE001 — record orchestration failures
-            status = "error"
-            error_message = str(exc)
+            msg = str(exc)
+            if self.progress.cancel_requested() or "cancel" in msg.lower():
+                status = "interrupted"
+                error_message = msg or "interrupted by operator"
+            else:
+                status = "error"
+                error_message = msg
             metrics_path.write_text(
                 json.dumps({"status": status, "error_message": error_message}, indent=2),
                 encoding="utf-8",
             )
         finally:
-            self._report(index=index, total=total, spec=spec, step="stop_episode", detail="cleanup")
+            self._stop_sidecar_collectors(stop_flag)
+            self._report(
+                index=index,
+                total=total,
+                spec=spec,
+                step="stop_episode",
+                detail="cleanup",
+                resumed=resumed,
+                completed_prior=completed_prior,
+            )
             self._stop_episode()
+            self._pull_sidecar_artifacts(spec, artifact_dir)
+            cleanup_run_media(
+                artifact_dir,
+                container_name=self.config.container_name,
+                container_run_dir=self._container_run_dir(spec),
+                try_encode=True,
+            )
 
         finished_at = utc_now_iso()
         duration_s = payload.get("duration_s")
@@ -192,6 +393,39 @@ class ExperimentOrchestrator:
             [(float(p[0]), float(p[1])) for p in trajectory if len(p) >= 2]
         )
 
+        summary = {
+            "status": status,
+            "error_message": error_message,
+            "final_coverage": final_coverage,
+            "distance_m": distance_m,
+            "duration_s": duration_s,
+            "algorithm_id": spec.algorithm_id,
+            "scene_id": spec.scene_id,
+            "seed": spec.seed,
+            "eval": {
+                "fov_deg": spec.eval_config.fov_deg,
+                "reveal_radius_m": spec.eval_config.reveal_radius_m,
+            },
+            "started_at": started_at,
+            "finished_at": finished_at,
+        }
+
+        write_run_package(
+            artifact_dir,
+            run_id=run_id,
+            experiment_id=spec.experiment_id,
+            algorithm_id=spec.algorithm_id,
+            scene_id=spec.scene_id,
+            seed=spec.seed,
+            status=status,
+            eval_fov_deg=spec.eval_config.fov_deg,
+            eval_reveal_radius_m=spec.eval_config.reveal_radius_m,
+            coverage_samples=payload.get("coverage_samples") or [],
+            trajectory=trajectory,
+            summary=summary,
+            revisit_bins=revisit,
+        )
+
         self.db.finalize_run(
             run_id,
             status=status,
@@ -204,9 +438,12 @@ class ExperimentOrchestrator:
             revisit_bins=revisit,
         )
 
-        (artifact_dir / "revisit_bins.json").write_text(
-            json.dumps(revisit, indent=2), encoding="utf-8"
-        )
+        if status == "completed":
+            self._state.mark_completed(run_id)
+        elif status == "interrupted":
+            self._state.set_interrupted(run_id)
+        else:
+            self._state.mark_failed(run_id)
 
         self.progress.update(
             count=index,
@@ -220,8 +457,104 @@ class ExperimentOrchestrator:
             seed=spec.seed,
             phase=payload.get("phase", ""),
             complete=False,
+            completed_prior=completed_prior,
+            remaining=max(0, total - index),
+            current_index=index,
+            resumed=resumed,
         )
         return OrchestratorResult(run_id=run_id, status=status, error_message=error_message)
+
+    def _container_run_dir(self, spec: RunSpec) -> str:
+        return f"/data/experiments/{spec.experiment_id}/{run_id_for(spec)}"
+
+    def _start_sidecar_collectors(
+        self, spec: RunSpec, artifact_dir: Path, stop_flag: Path
+    ) -> None:
+        run_dir = self._container_run_dir(spec)
+        media_dir = f"{run_dir}/media"
+        logs_dir = f"{run_dir}/logs"
+        stop_container = f"{run_dir}/.collectors_stop"
+        self._docker(
+            f"mkdir -p {shlex.quote(media_dir)} {shlex.quote(logs_dir)} && "
+            f"rm -f {shlex.quote(stop_container)}"
+        )
+        # Detached exec so sidecars survive after this call returns (nohup alone
+        # is not enough — docker exec often reaps the process group on exit).
+        # Must use system Python 3.12 — conda python3 lacks rclpy bindings.
+        for script, args in (
+            (
+                "experiment_media_recorder.py",
+                f"--out-dir {shlex.quote(media_dir)} "
+                f"--stop-flag {shlex.quote(stop_container)} "
+                f"--max-runtime-s {int(spec.timeout_s) + 120}",
+            ),
+            (
+                "experiment_event_logger.py",
+                f"--output {shlex.quote(logs_dir + '/events.jsonl')} --gzip "
+                f"--stop-flag {shlex.quote(stop_container)} "
+                f"--max-runtime-s {int(spec.timeout_s) + 120}",
+            ),
+        ):
+            log_name = (
+                "media_recorder.log"
+                if "media_recorder" in script
+                else "event_logger.log"
+            )
+            subprocess.run(
+                [
+                    "docker",
+                    "exec",
+                    "-d",
+                    self.config.container_name,
+                    "bash",
+                    "-lc",
+                    (
+                        "source /opt/ros/jazzy/setup.bash && "
+                        "source /opt/explorer_workspace/ros_workspace/install/setup.bash && "
+                        f"/usr/bin/python3 /workspace/scripts/{script} {args} "
+                        f"> {shlex.quote(logs_dir + '/' + log_name)} 2>&1"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self._sidecar_stop = stop_container
+
+    def _stop_sidecar_collectors(self, stop_flag: Path) -> None:
+        stop_container = getattr(self, "_sidecar_stop", None)
+        if stop_container:
+            self._docker(f"touch {shlex.quote(stop_container)}", check=False)
+            # Allow JPEG dump + ffmpeg finalize (can take several seconds).
+            time.sleep(8.0)
+
+    def _pull_sidecar_artifacts(self, spec: RunSpec, artifact_dir: Path) -> None:
+        """Ensure media/logs exist on host (bind mount usually already synced)."""
+        run_dir = self._container_run_dir(spec)
+        # Copy collector log snippet if present.
+        for rel in (
+            "media/final_grid_map.png",
+            "media/final_nav_plan.png",
+            "media/map_timelapse_10x.mp4",
+            "logs/events.jsonl.gz",
+            "logs/events.jsonl",
+            "logs/media_recorder.log",
+            "logs/event_logger.log",
+        ):
+            host_path = artifact_dir / rel
+            if host_path.is_file():
+                continue
+            host_path.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(
+                [
+                    "docker",
+                    "cp",
+                    f"{self.config.container_name}:{run_dir}/{rel}",
+                    str(host_path),
+                ],
+                capture_output=True,
+                check=False,
+            )
 
     def _docker(self, script: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
         cmd = [
@@ -236,39 +569,46 @@ class ExperimentOrchestrator:
 
     def _prepare_scene(self, spec: RunSpec) -> None:
         scene_path = spec.scene_path
-        run_id = run_id_for(spec)
+        run_dir = self._container_run_dir(spec)
         self._docker(
-            f"mkdir -p /data/experiments && printf %s {shlex.quote(scene_path)} > /data/selected_scene.path"
+            f"mkdir -p {shlex.quote(run_dir)} && "
+            f"printf %s {shlex.quote(scene_path)} > /data/selected_scene.path"
         )
-        env_file = f"/data/experiments/.env_{run_id}"
+        env_file = f"{run_dir}/.env"
         self._docker(
-            " && ".join(
-                [
-                    "mkdir -p /data/experiments",
-                    (
-                        f"printf '%s\\n' "
-                        f"{shlex.quote(f'HABITAT_SPAWN_SEED={int(spec.seed)}')} "
-                        f"{shlex.quote(f'HABITAT_SENSOR_RANGE_M={float(spec.eval_config.reveal_radius_m)}')} "
-                        f"> {shlex.quote(env_file)}"
-                    ),
-                ]
+            (
+                f"printf '%s\\n' "
+                f"{shlex.quote(f'HABITAT_SPAWN_SEED={int(spec.seed)}')} "
+                f"{shlex.quote(f'HABITAT_SENSOR_RANGE_M={float(spec.eval_config.reveal_radius_m)}')} "
+                f"> {shlex.quote(env_file)}"
             )
         )
         self._episode_env_file = env_file
 
     def _start_episode(self, spec: RunSpec) -> None:
         env_file = getattr(self, "_episode_env_file", "")
-        start_cmd = (
-            f"tmux kill-session -t habitat 2>/dev/null || true; "
-            f"tmux new-session -d -s habitat "
-            f"'set -a && source {shlex.quote(env_file)} && set +a && bash /workspace/scripts/start_sim.sh'"
-        )
-        proc = self._docker(start_cmd, check=False)
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"failed to start episode tmux session: {proc.stderr.strip() or proc.stdout}"
+        start_cmd = build_tmux_episode_start_cmd(env_file)
+        last_err = ""
+        for attempt in range(1, 4):
+            proc = self._docker(start_cmd, check=False)
+            has = self._docker("tmux has-session -t habitat", check=False)
+            if tmux_start_looks_ok(
+                new_session_rc=proc.returncode, has_session_rc=has.returncode
+            ):
+                time.sleep(5.0)
+                return
+            last_err = (proc.stderr or proc.stdout or "").strip() or (
+                f"new_session_rc={proc.returncode} has_session_rc={has.returncode}"
             )
-        time.sleep(5.0)
+            # Recover from a dead/wedged tmux server, then retry.
+            self._docker(
+                "tmux kill-server 2>/dev/null || true; sleep 0.5; tmux start-server",
+                check=False,
+            )
+            time.sleep(0.5 * attempt)
+        raise RuntimeError(
+            f"failed to start episode tmux session after retries: {last_err}"
+        )
 
     def _wait_for_explore_node(
         self,
@@ -277,6 +617,8 @@ class ExperimentOrchestrator:
         index: int,
         total: int,
         timeout_s: float = 180.0,
+        resumed: bool = False,
+        completed_prior: int = 0,
     ) -> None:
         deadline = time.time() + timeout_s
         while time.time() < deadline:
@@ -296,6 +638,8 @@ class ExperimentOrchestrator:
                 spec=spec,
                 step="wait_explore_node",
                 detail="still waiting for /explore",
+                resumed=resumed,
+                completed_prior=completed_prior,
             )
             time.sleep(2.0)
         raise TimeoutError("explore node did not become ready within timeout")
@@ -320,11 +664,10 @@ class ExperimentOrchestrator:
         *,
         progress_file: Path | None,
     ) -> Dict[str, Any]:
-        container_out = f"/data/experiments/{run_id_for(spec)}_metrics.json"
+        run_dir = self._container_run_dir(spec)
+        container_out = f"{run_dir}/run_metrics.json"
         container_progress = (
-            f"/data/experiments/.episode_progress_{run_id_for(spec)}.json"
-            if progress_file is not None
-            else ""
+            f"{run_dir}/.episode_progress.json" if progress_file is not None else ""
         )
         progress_arg = (
             f"--progress-file {shlex.quote(container_progress)} "
@@ -340,7 +683,7 @@ class ExperimentOrchestrator:
             (
                 "source /opt/ros/jazzy/setup.bash && "
                 "source /opt/explorer_workspace/ros_workspace/install/setup.bash && "
-                "python3 /workspace/scripts/experiment_collect.py "
+                "/usr/bin/python3 /workspace/scripts/experiment_collect.py "
                 f"--timeout-s {int(spec.timeout_s)} "
                 f"--output {shlex.quote(container_out)} "
                 f"{progress_arg}"
@@ -371,6 +714,10 @@ class ExperimentOrchestrator:
             raise RuntimeError(f"metrics file missing: {container_out}")
         payload = json.loads(cat.stdout)
         host_output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        # Also stash a short collector log under the package.
+        collector_log = host_output.parent / "logs" / "collector.log"
+        collector_log.parent.mkdir(parents=True, exist_ok=True)
+        collector_log.write_text((stdout or "") + "\n" + (stderr or ""), encoding="utf-8")
         return payload
 
     def _merge_episode_progress(

@@ -121,7 +121,7 @@ to “free” (`free_near_eps`). That hid real far walls and did not stop floor 
 ### Navigation
 
 - **Default:** `explore_node` with `navigation_mode:=nav2` sends `NavigateToPose` goals; Nav2 plans on costmaps; `/cmd_vel` is converted to discrete Habitat steps via `cmd_vel_to_discrete_node`.
-- **No-recovery BT:** `config/navigate_to_pose_no_recovery.xml` — plan fail aborts immediately (no Spin/BackUp). Explore marks that frontier fully explored and moves on.
+- **No-recovery BT:** `config/navigate_to_pose_no_recovery.xml` — plan fail aborts immediately (no Spin/BackUp). Explore then runs DiscreteMove thrash recovery (alternate BACK/FWD with growing steps, max 5) before marking that frontier fully explored and moving on.
 - **Planner:** Navfn `allow_unknown: true` (paths may traverse unexplored cells), goal `tolerance: 1.0` m.
 - **Fallback:** `navigation_mode:=discrete` uses straight-line `discrete_navigator` + `/movement/discrete_move` (no obstacle planning).
 

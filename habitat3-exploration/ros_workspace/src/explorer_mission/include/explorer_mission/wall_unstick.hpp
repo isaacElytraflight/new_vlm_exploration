@@ -17,8 +17,12 @@ constexpr uint16_t kNavErrorNoValidPath = 208;
 
 /// DiscreteMove direction values (explorer_msgs/DiscreteMove).
 constexpr int kUnstickForward = 0;
+constexpr int kUnstickBackward = 1;
 constexpr int kUnstickTurnLeft = 2;
 constexpr int kUnstickTurnRight = 3;
+
+/// Default outer unstick budget before marking the destination frontier dead.
+constexpr int kDefaultMaxUnstickAttempts = 5;
 
 struct UnstickDecision
 {
@@ -26,14 +30,30 @@ struct UnstickDecision
   bool mark_frontier_dead{false};
 };
 
-/// Recovery policy after NavigateToPose failure:
-/// unstick on START_OCCUPIED or low clearance; mark frontiers dead mainly on
-/// GOAL_OCCUPIED or NO_VALID_PATH (including after an unstick attempt).
+/// Recovery policy after NavigateToPose failure.
+///
+/// @param unstick_attempts how many thrash recoveries already ran for this goal
+/// @param max_unstick_attempts budget before marking dead (default 5)
+///
+/// Thrash DiscreteMove (back/forward, growing steps) on START_OCCUPIED / low
+/// clearance / NO_VALID_PATH while attempts remain. Mark on GOAL_OCCUPIED,
+/// exhausted budget, or generic stuck.
 UnstickDecision decideNavFailureRecovery(
   uint16_t error_code,
   double clearance_m,
   double min_clearance_m,
-  bool already_unstuck);
+  int unstick_attempts = 0,
+  int max_unstick_attempts = kDefaultMaxUnstickAttempts);
+
+/// One recovery DiscreteMove: alternate BACKWARD / FORWARD with growing steps.
+/// attempt 0: BACK×1, 1: FWD×1, 2: BACK×2, 3: FWD×2, 4: BACK×3, …
+struct UnstickThrashMotion
+{
+  int direction{kUnstickBackward};
+  int steps{1};
+};
+
+UnstickThrashMotion unstickThrashMotion(int attempt_index);
 
 /// Distance (m) to nearest occupied cell (>=50). nullopt if pose off-map / bad grid.
 std::optional<double> clearanceToOccupiedM(
@@ -54,9 +74,11 @@ struct DiscreteUnstickStep
 };
 
 /// Turn toward gradient, or step forward once aligned within align_tol_rad.
+/// Retained for tests / optional map-based recovery; explore uses reverse steps.
 std::optional<DiscreteUnstickStep> nextUnstickStep(
   double robot_yaw_rad,
   const cv::Point2f & gradient_dir_unit,
-  double align_tol_rad = 0.35);
+  double align_tol_rad = 0.35,
+  int forward_steps = 1);
 
 }  // namespace explorer_mission

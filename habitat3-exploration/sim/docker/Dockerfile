@@ -8,7 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl wget git git-lfs bzip2 tmux procps \
-        xvfb x11vnc novnc websockify feh \
+        xvfb x11vnc novnc websockify feh ffmpeg \
         libglvnd0 libgl1 libegl1 libgles2 libopengl0 libglx0 \
         libx11-6 libxext6 libsm6 libxrender1 \
         python3-pip python3-pytest \

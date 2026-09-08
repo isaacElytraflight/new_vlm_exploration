@@ -38,6 +38,15 @@ TEST(ReturnHomeGuard, OnReturnHomeSucceeded_UnblocksSelection_Positive)
   EXPECT_TRUE(guard.maySelectFrontierChild());
 }
 
+TEST(ReturnHomeGuard, OnReturnHomeAbandoned_UnblocksSelection_Positive)
+{
+  explorer_mission::ReturnHomeGuard guard;
+  guard.onChildNavFailed(9u);
+  guard.onReturnHomeAbandoned();
+  EXPECT_FALSE(guard.isAwaitingReturn());
+  EXPECT_TRUE(guard.maySelectFrontierChild());
+}
+
 TEST(ReturnHomeGuard, RemainsBlockedUntilReturnSuccess_Negative)
 {
   explorer_mission::ReturnHomeGuard guard;

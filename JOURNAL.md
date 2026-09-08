@@ -6,6 +6,97 @@ Add a new dated section at the top when you work on this repo.
 
 ---
 
+## 2026-09-07 — Milestone B2.1 closeout (document + push)
+
+**Shipped this arc:** run packages + resume/fresh campaigns, media finalize/cleanup, Elytra campaign radios, resilient tmux start, return-home abandon, DiscreteMove thrash unstick (BACK/FWD×growing, max 5). Docs: `FUTURE_GOALS.md`, `design_doc.md` recovery note.
+
+**Do not commit:** `sim/data/experiments/` (gitignored), `aarush_thesis.pdf`, `desktop.ini`.
+
+---
+
+## 2026-09-07 — Thrash recovery: alternate back/forward with growing steps
+
+When back is against the wall, pure reverse fails. Recovery now: BACK×1, FWD×1, BACK×2, FWD×2, BACK×3 (max 5), then mark. Still DiscreteMove only (no Nav2).
+
+---
+
+## 2026-09-07 — Reverse DiscreteMove recovery (replace gradient unstick)
+
+**Problem:** Robot trapped in occluded map cells that look like walls; Nav2/clearance-gradient recovery could not path out.
+
+**Fix:** On START_OCCUPIED / low clearance / NO_VALID_PATH, recover with DiscreteMove BACKWARD ×1 (no Nav2), retry goal, up to 5 times, then mark dead. `test_wall_unstick` 23/23.
+
+---
+
+## 2026-09-07 — Fix ablation seed0 tmux fail + seed1 return-home thrash
+
+**Seed0:** `tmux kill-session` on the last session killed the server; immediate `new-session` → `server exited unexpectedly`. Fix: `sleep` + `tmux start-server` before `new-session`, verify `has-session`, retry up to 3× (kill-server recover).
+
+**Seed1:** After child nav fail, `ReturnHomeGuard` stayed awaiting when return-home failed; loop only retried return-home (`cur=9 tgt=9`). Fix: skip nav if already within `goal_accept_radius_m`; abandon clears guard; `navigateToGoal` short-circuits near goals.
+
+**Verify:** `test_tmux_start` 7/7; `test_return_home_guard` + `test_wall_unstick` pass; `explorer_mission` rebuilt.
+
+---
+
+## 2026-09-07 — Escalating unstick budget (max 5) then mark dead
+
+**Bug:** After one failed unstick, `decideNavFailureRecovery(..., already_unstuck=true)` returned `mark=false` → explore loop re-selected the same child forever (greedy seed1 thrash).
+
+**Fix:** Attempt budget (`unstick_max_attempts`, default 5). Each retry escalates: forward DiscreteMove steps = attempt+1, clearance target += 0.05 m, more micro-steps. Exhausted budget → `mark_frontier_dead=true`.
+
+**Verify:** `test_wall_unstick` 22/22; rebuilt `explorer_mission` in container.
+
+---
+
+## 2026-09-07 — Resume vs fresh UI + package layout + interrupt cleanup
+
+**Q0 (mtime):** Resume correctly skipped completed `vlm_dfs` cells; only greedy ran this afternoon — not a swapped order.
+
+**Shipped:**
+- Elytra: radio **Resume incomplete** / **Fresh campaign** → `--resume` or `--fresh --experiment-id-suffix <timestamp>`.
+- Scratch files moved under run package: `.env`, `run_metrics.json`, `.episode_progress.json` (no more top-level `.env_*` / `*_metrics.json`).
+- On stop/fail: `cleanup_run_media` tries encode leftover frames then deletes `media/frames/`; status `interrupted` when cancel detected.
+
+**Still open (nav thrash):** `decideNavFailureRecovery` returns `mark_frontier_dead=false` after failed unstick when start still invalid — explore loop backtracks without killing the child → same target forever. Discuss before patching.
+
+---
+
+## 2026-09-06 — Fix unplayable ablation timelapse MP4s
+
+**Symptom:** `map_timelapse_10x.mp4` was 0 bytes / `moov atom not found`.
+
+**Causes:** (1) live ffmpeg JPEG pipe promoted empty/truncated files; stderr discarded; (2) odd frame heights broke libx264 yuv420p; (3) `docker exec` + `nohup &` often reaped sidecars when the exec returned.
+
+**Fix:** dump `frames/frame_XXXXXX.jpg` during the run → single ffmpeg encode at finalize (even dims, `.encoding.mp4` temp, `+faststart`, only promote if size OK); launch sidecars with `docker exec -d`; wait 8s on stop for finalize.
+
+---
+
+## 2026-09-06 — Ablation 4/4 failed: conda python3 vs rclpy
+
+**Symptom:** All smoke runs `status=error`. Tmux log full of `rcl_shutdown already called` / KeyboardInterrupt / Nav2 destroying — looked like a stack crash.
+
+**Actual root cause:** Orchestrator `docker exec … python3 experiment_collect.py` resolved to **`/opt/conda/bin/python3` (3.14)**. ROS Jazzy `rclpy` is built for **system `/usr/bin/python3` (3.12)** → `ModuleNotFoundError: rclpy._rclpy_pybind11`. Teardown spam was just `stop_sim` interrupting a half-started episode.
+
+**Fix:** Use `/usr/bin/python3` for collector + media/event sidecars in `experiments/orchestrator.py` (same rule as `start_sim.sh` PATH sanitize).
+
+---
+
+## 2026-09-06 — Ablation artifact packages + crash-safe resume
+
+### What shipped
+
+- Per-run package under `sim/data/experiments/<exp>/<run_id>/`: `manifest.json`, metrics CSVs/JSON, media (final PNGs + 10× timelapse), gzipped event JSONL.
+- Sidecar container scripts: `experiment_media_recorder.py`, `experiment_event_logger.py` (started by orchestrator during collection).
+- Offline viz: `experiments/render_run.py` → `figures/*.png`.
+- Resume: `experiment_state.json`, SQLite WAL + `synchronous=NORMAL`, orphan `running` → `interrupted`, skip completed; CLI `--resume`/`--fresh`; Elytra progress fields `completed_prior`/`remaining`/`resumed`.
+
+### Notes
+
+- Prefer ≤20 MB/run (JPEG q~60, single side-by-side MP4); hard budget 50 MB with `--grid-only` fallback on recorder.
+- Measured 15‑min smoke size still TBD once a real episode package is produced.
+
+---
+
 ## 2026-09-06 — Session closeout (stepping-off point)
 
 ### Shipped this arc (summary)

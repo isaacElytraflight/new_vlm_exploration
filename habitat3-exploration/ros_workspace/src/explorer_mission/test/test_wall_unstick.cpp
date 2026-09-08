@@ -41,7 +41,7 @@ TEST(WallUnstickHarness, NegativeControl)
 TEST(DecideNavFailure, StartOccupiedRequestsUnstickNoMark_Positive)
 {
   const auto d = explorer_mission::decideNavFailureRecovery(
-    explorer_mission::kNavErrorStartOccupied, 1.0, 0.25, false);
+    explorer_mission::kNavErrorStartOccupied, 1.0, 0.25, /*unstick_attempts=*/0, /*max=*/5);
   EXPECT_TRUE(d.attempt_unstick);
   EXPECT_FALSE(d.mark_frontier_dead);
 }
@@ -49,7 +49,7 @@ TEST(DecideNavFailure, StartOccupiedRequestsUnstickNoMark_Positive)
 TEST(DecideNavFailure, LowClearanceRequestsUnstickEvenWithoutCode_Positive)
 {
   const auto d = explorer_mission::decideNavFailureRecovery(
-    explorer_mission::kNavErrorNone, 0.10, 0.25, false);
+    explorer_mission::kNavErrorNone, 0.10, 0.25, /*unstick_attempts=*/0, /*max=*/5);
   EXPECT_TRUE(d.attempt_unstick);
   EXPECT_FALSE(d.mark_frontier_dead);
 }
@@ -57,32 +57,50 @@ TEST(DecideNavFailure, LowClearanceRequestsUnstickEvenWithoutCode_Positive)
 TEST(DecideNavFailure, GoalOccupiedMarksWithoutUnstick_Positive)
 {
   const auto d = explorer_mission::decideNavFailureRecovery(
-    explorer_mission::kNavErrorGoalOccupied, 1.0, 0.25, false);
+    explorer_mission::kNavErrorGoalOccupied, 1.0, 0.25, /*unstick_attempts=*/0, /*max=*/5);
   EXPECT_FALSE(d.attempt_unstick);
   EXPECT_TRUE(d.mark_frontier_dead);
 }
 
-TEST(DecideNavFailure, NoPathWithGoodClearanceMarks_Positive)
+TEST(DecideNavFailure, NoPathWithGoodClearanceRequestsReverseUnstick_Positive)
+{
+  // Occlusion traps often surface as NO_VALID_PATH; reverse DiscreteMove first.
+  const auto d = explorer_mission::decideNavFailureRecovery(
+    explorer_mission::kNavErrorNoValidPath, 1.0, 0.25, /*unstick_attempts=*/0, /*max=*/5);
+  EXPECT_TRUE(d.attempt_unstick);
+  EXPECT_FALSE(d.mark_frontier_dead);
+}
+
+TEST(DecideNavFailure, NoPathAfterBudgetExhaustedMarks_Positive)
 {
   const auto d = explorer_mission::decideNavFailureRecovery(
-    explorer_mission::kNavErrorNoValidPath, 1.0, 0.25, false);
+    explorer_mission::kNavErrorNoValidPath, 0.10, 0.25, /*unstick_attempts=*/5, /*max=*/5);
   EXPECT_FALSE(d.attempt_unstick);
   EXPECT_TRUE(d.mark_frontier_dead);
 }
 
-TEST(DecideNavFailure, NoPathAfterUnstickMarks_Positive)
+TEST(DecideNavFailure, StartBadAllowsRetryWithinBudget_Positive)
+{
+  // After first unstick, start still bad → try again (not mark yet).
+  const auto d = explorer_mission::decideNavFailureRecovery(
+    explorer_mission::kNavErrorStartOccupied, 0.05, 0.25, /*unstick_attempts=*/1, /*max=*/5);
+  EXPECT_TRUE(d.attempt_unstick);
+  EXPECT_FALSE(d.mark_frontier_dead);
+}
+
+TEST(DecideNavFailure, StartBadExhaustsBudgetThenMarks_Positive)
 {
   const auto d = explorer_mission::decideNavFailureRecovery(
-    explorer_mission::kNavErrorNoValidPath, 0.10, 0.25, true);
+    explorer_mission::kNavErrorStartOccupied, 0.05, 0.25, /*unstick_attempts=*/5, /*max=*/5);
   EXPECT_FALSE(d.attempt_unstick);
   EXPECT_TRUE(d.mark_frontier_dead);
 }
 
-TEST(DecideNavFailure, StartStillBadAfterUnstickDoesNotMark_Negative)
+TEST(DecideNavFailure, StartBadFourthRetryStillAllowed_Positive)
 {
   const auto d = explorer_mission::decideNavFailureRecovery(
-    explorer_mission::kNavErrorStartOccupied, 0.05, 0.25, true);
-  EXPECT_FALSE(d.attempt_unstick);
+    explorer_mission::kNavErrorStartOccupied, 0.05, 0.25, /*unstick_attempts=*/4, /*max=*/5);
+  EXPECT_TRUE(d.attempt_unstick);
   EXPECT_FALSE(d.mark_frontier_dead);
 }
 
@@ -90,9 +108,48 @@ TEST(DecideNavFailure, AdequateClearanceNoSpecialCodeMarks_Negative)
 {
   // Generic abort / stuck with OK clearance: progress tree (existing behavior).
   const auto d = explorer_mission::decideNavFailureRecovery(
-    explorer_mission::kNavErrorNone, 0.50, 0.25, false);
+    explorer_mission::kNavErrorNone, 0.50, 0.25, /*unstick_attempts=*/0, /*max=*/5);
   EXPECT_FALSE(d.attempt_unstick);
   EXPECT_TRUE(d.mark_frontier_dead);
+}
+
+TEST(ThrashUnstick, AlternatesBackwardThenForward_Positive)
+{
+  const auto m0 = explorer_mission::unstickThrashMotion(0);
+  EXPECT_EQ(m0.direction, explorer_mission::kUnstickBackward);
+  EXPECT_EQ(m0.steps, 1);
+
+  const auto m1 = explorer_mission::unstickThrashMotion(1);
+  EXPECT_EQ(m1.direction, explorer_mission::kUnstickForward);
+  EXPECT_EQ(m1.steps, 1);
+
+  const auto m2 = explorer_mission::unstickThrashMotion(2);
+  EXPECT_EQ(m2.direction, explorer_mission::kUnstickBackward);
+  EXPECT_EQ(m2.steps, 2);
+
+  const auto m3 = explorer_mission::unstickThrashMotion(3);
+  EXPECT_EQ(m3.direction, explorer_mission::kUnstickForward);
+  EXPECT_EQ(m3.steps, 2);
+
+  const auto m4 = explorer_mission::unstickThrashMotion(4);
+  EXPECT_EQ(m4.direction, explorer_mission::kUnstickBackward);
+  EXPECT_EQ(m4.steps, 3);
+}
+
+TEST(ThrashUnstick, DistancesIncreaseEveryPair_Positive)
+{
+  EXPECT_EQ(explorer_mission::unstickThrashMotion(0).steps, 1);
+  EXPECT_EQ(explorer_mission::unstickThrashMotion(1).steps, 1);
+  EXPECT_EQ(explorer_mission::unstickThrashMotion(2).steps, 2);
+  EXPECT_EQ(explorer_mission::unstickThrashMotion(3).steps, 2);
+  EXPECT_EQ(explorer_mission::unstickThrashMotion(4).steps, 3);
+}
+
+TEST(ThrashUnstick, NegativeAttemptClampsToBackwardOne_Negative)
+{
+  const auto m = explorer_mission::unstickThrashMotion(-5);
+  EXPECT_EQ(m.direction, explorer_mission::kUnstickBackward);
+  EXPECT_EQ(m.steps, 1);
 }
 
 TEST(Clearance, FarFromWallHasLargeClearance_Positive)
@@ -143,17 +200,28 @@ TEST(ClearanceGradient, EmptyMapNoGradient_Negative)
 TEST(NextUnstickStep, TurnsWhenMisaligned_Positive)
 {
   cv::Point2f grad(1.0f, 0.0f);  // want +x
-  const auto step = explorer_mission::nextUnstickStep(/*yaw=*/M_PI / 2.0, grad, 0.35);
+  const auto step = explorer_mission::nextUnstickStep(/*yaw=*/M_PI / 2.0, grad, 0.35, /*forward_steps=*/3);
   ASSERT_TRUE(step.has_value());
   EXPECT_EQ(step->direction, explorer_mission::kUnstickTurnRight);
+  EXPECT_EQ(step->steps, 1);  // turns stay single-step
 }
 
 TEST(NextUnstickStep, ForwardsWhenAligned_Positive)
 {
   cv::Point2f grad(1.0f, 0.0f);
-  const auto step = explorer_mission::nextUnstickStep(/*yaw=*/0.05, grad, 0.35);
+  const auto step = explorer_mission::nextUnstickStep(/*yaw=*/0.05, grad, 0.35, /*forward_steps=*/1);
   ASSERT_TRUE(step.has_value());
   EXPECT_EQ(step->direction, explorer_mission::kUnstickForward);
+  EXPECT_EQ(step->steps, 1);
+}
+
+TEST(NextUnstickStep, EscalatedForwardUsesLargerStepCount_Positive)
+{
+  cv::Point2f grad(1.0f, 0.0f);
+  const auto step = explorer_mission::nextUnstickStep(/*yaw=*/0.0, grad, 0.35, /*forward_steps=*/4);
+  ASSERT_TRUE(step.has_value());
+  EXPECT_EQ(step->direction, explorer_mission::kUnstickForward);
+  EXPECT_EQ(step->steps, 4);
 }
 
 TEST(NextUnstickStep, ZeroGradientRejected_Negative)

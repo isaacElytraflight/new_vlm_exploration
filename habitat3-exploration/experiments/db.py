@@ -80,6 +80,8 @@ class ExperimentDB:
     def connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
         try:
             yield conn
             conn.commit()
@@ -102,13 +104,33 @@ class ExperimentDB:
         artifact_dir: str,
         started_at: Optional[str] = None,
     ) -> None:
+        """Insert or reset a run row to running (safe for interrupted retries)."""
+        started = started_at or utc_now_iso()
         with self.connect() as conn:
+            conn.execute("DELETE FROM coverage_samples WHERE run_id = ?", (run_id,))
+            conn.execute("DELETE FROM revisit_bins WHERE run_id = ?", (run_id,))
             conn.execute(
                 """
                 INSERT INTO runs (
                   run_id, experiment_id, algorithm_id, scene_id, seed,
-                  started_at, status, config_json, artifact_dir
-                ) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)
+                  started_at, finished_at, status, error_message,
+                  final_coverage, distance_m, duration_s,
+                  config_json, artifact_dir
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL, 'running', NULL, NULL, NULL, NULL, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                  experiment_id=excluded.experiment_id,
+                  algorithm_id=excluded.algorithm_id,
+                  scene_id=excluded.scene_id,
+                  seed=excluded.seed,
+                  started_at=excluded.started_at,
+                  finished_at=NULL,
+                  status='running',
+                  error_message=NULL,
+                  final_coverage=NULL,
+                  distance_m=NULL,
+                  duration_s=NULL,
+                  config_json=excluded.config_json,
+                  artifact_dir=excluded.artifact_dir
                 """,
                 (
                     run_id,
@@ -116,7 +138,7 @@ class ExperimentDB:
                     algorithm_id,
                     scene_id,
                     int(seed),
-                    started_at or utc_now_iso(),
+                    started,
                     config_json,
                     artifact_dir,
                 ),
@@ -157,6 +179,8 @@ class ExperimentDB:
                     run_id,
                 ),
             )
+            conn.execute("DELETE FROM coverage_samples WHERE run_id = ?", (run_id,))
+            conn.execute("DELETE FROM revisit_bins WHERE run_id = ?", (run_id,))
             if coverage_samples:
                 conn.executemany(
                     """
@@ -177,6 +201,42 @@ class ExperimentDB:
                     """,
                     [(run_id, int(k), int(v)) for k, v in revisit_bins.items()],
                 )
+
+    def mark_running_interrupted(self, experiment_id: str) -> List[str]:
+        """Mark orphan running rows as interrupted; return affected run_ids."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT run_id FROM runs
+                WHERE experiment_id = ? AND status = 'running'
+                """,
+                (experiment_id,),
+            ).fetchall()
+            run_ids = [str(r["run_id"]) for r in rows]
+            if run_ids:
+                conn.execute(
+                    """
+                    UPDATE runs SET
+                      status = 'interrupted',
+                      finished_at = ?,
+                      error_message = COALESCE(error_message, 'interrupted by resume recovery')
+                    WHERE experiment_id = ? AND status = 'running'
+                    """,
+                    (utc_now_iso(), experiment_id),
+                )
+        return run_ids
+
+    def list_completed_run_ids(self, experiment_id: str) -> List[str]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT run_id FROM runs
+                WHERE experiment_id = ? AND status = 'completed'
+                ORDER BY started_at
+                """,
+                (experiment_id,),
+            ).fetchall()
+        return [str(r["run_id"]) for r in rows]
 
     def get_run(self, run_id: str) -> Optional[RunRecord]:
         with self.connect() as conn:

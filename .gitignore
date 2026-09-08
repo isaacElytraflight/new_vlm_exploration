@@ -27,6 +27,10 @@ node_modules/
 # OS / editor cruft
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# Local papers / unrelated binaries (keep out of research tree commits)
+/aarush_thesis.pdf
 
 # Local desktop screenshots (not project assets)
 /Screenshot*.png

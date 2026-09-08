@@ -21,6 +21,12 @@ public:
     awaiting_return_ = false;
   }
 
+  /// Clear the block after exhausted return-home retries so exploration can continue.
+  void onReturnHomeAbandoned()
+  {
+    awaiting_return_ = false;
+  }
+
   bool isAwaitingReturn() const
   {
     return awaiting_return_;

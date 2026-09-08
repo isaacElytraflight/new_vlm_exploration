@@ -56,7 +56,8 @@ buttons:
     label: Start Ablation Batch
     description: >-
       Run the Goal B experiment matrix unattended (smoke config by default).
-      Progress shows run index and live exploration phase.
+      Resumes incomplete experiments (skips completed runs). Progress shows
+      completed/total and live exploration phase.
     kind: ablation
     experimentConfig: experiments/configs/smoke.yaml
   - id: stop-ablation

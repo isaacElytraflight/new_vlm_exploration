@@ -14,24 +14,23 @@ Contract reference: [habitat3-exploration/ros_workspace/design_doc.md](habitat3-
 
 ---
 
-## Current baseline (as of 2026-09-06)
+## Current baseline (as of 2026-09-07)
 
 ```text
 /depth_data + /camera_info + /odom
         → known_pose_pc_mapper (C++, default)  →  /grid_map
         → explore_node (frontier DFS + VLM scores)
         → Nav2 NavigateToPose  →  /cmd_vel  →  DiscreteMove (Habitat)
+        → on nav fail: explore thrash BACK/FWD DiscreteMove (×5), then mark frontier
 ```
 
 | Piece | Location | Notes |
 |-------|----------|--------|
 | Mapping | C++ `known_pose_pc_mapper` (`use_pc_mapper:=true`) | Subsample 8; pose-gated integrate; Bresenham early-stop on OCCUPIED; grid inflate 0.05 m |
-| Legacy laser map | `known_pose_mapper` | Available via `use_pc_mapper:=false` |
-| Exploration | `explore_node` | Frontier tree DFS; VLM openness; return-home guard; wall-unstick |
+| Exploration | `explore_node` | Frontier tree DFS; VLM openness; return-home guard (abandon-safe); thrash unstick |
 | Motion | `cmd_vel_to_discrete` | Drive vs turn via `|ang|/|lin|` ratio (default 1.0) |
 | Nav2 | `nav2_params.yaml` | No-recovery BT; `allow_unknown: true`; costmap inflation **0.15 m** |
-| Coverage (live) | async IPC cache + `coverage_metrics_node` | Dashboard; not paper eval |
-| Ablations | `experiments/` + Elytra Start/Stop Ablation | SQLite + smoke matrix CLI |
+| Ablations | `experiments/` + Elytra Start/Stop Ablation | Packages + WAL resume; **Resume / Fresh** campaign UI |
 
 ---
 
@@ -39,50 +38,44 @@ Contract reference: [habitat3-exploration/ros_workspace/design_doc.md](habitat3-
 
 | Goal | Shipped | Pointers |
 |------|---------|----------|
-| **A — PC → 2D occupancy** | 2026-08-26 … 2026-09-06 | C++ mapper, wall band 0.05–1.0 m, FREE ↛ overwrite OCCUPIED |
+| **A — PC → 2D occupancy** | 2026-08-26 … 2026-09-06 | C++ mapper, wall band 0.05–1.0 m |
 | **B — Ablation harness v1** | 2026-08-31 | YAML matrix, SQLite, aggregate tables, Elytra ablation buttons |
-| **Nav robustness (partial)** | 2026-09-06 | Return-home guard; stuck policy 1 m / 60 s; wall-unstick; cmd_vel curvature ratio; inflation 0.15 m |
-
-Historical discussion for A/B is in git history / JOURNAL; no need to keep the long design tables here.
+| **Nav robustness (partial)** | 2026-09-06 | Return-home; stuck policy; wall-unstick; cmd_vel ratio; inflation 0.15 m |
+| **B2 — Run packages + resume** | 2026-09-06 | Artifact package, media/events, `render_run.py`, WAL resume |
+| **B2.1 — Campaign ops + thrash recovery** | 2026-09-07 | Fresh vs resume UI; per-run scratch layout; interrupt media cleanup; tmux start retries; return-home abandon; DiscreteMove thrash BACK/FWD×growing (max 5) |
 
 ---
 
-## Open goals (next section of the project)
+## Open goals (primary next steps)
 
-### 1 — Paper-ready evaluation (extend Goal B)
+### 1 — Paper-ready evaluation
 
-**Priority:** P1 for thesis tables.
+| Gap | Notes |
+|-----|--------|
+| Privileged FOV 90° | Radius wired; FOV mode still open |
+| True greedy-without-VLM | Confirm profile semantics |
+| Scale to ~50 seeds / cell | Smoke packages + resume/fresh proven; next is matrix scale |
 
-| Gap | Status | Notes |
-|-----|--------|--------|
-| Privileged coverage FOV modes | Partial | Radius via `HABITAT_SENSOR_RANGE_M`; **90° FOV mode still open** (360° used today) |
-| Coverage-vs-distance **plots** | Open | Tables done (`aggregate_results.py`); plot export deferred |
-| True greedy-without-VLM baseline | Open | Profile exists; confirm it disables VLM ranking as intended |
-| Scale to ~50 runs / cell | Open | Smoke matrix only so far |
+**Eval rule:** Paper coverage stays decoupled from perception `/grid_map` (privileged Habitat reveal).
 
-**Eval rule:** Paper coverage must stay **decoupled from perception `/grid_map`** (privileged Habitat reveal), matching Aarush thesis Ch. 4.
+**Package reminder (shipped):** each run under `sim/data/experiments/<exp>/<run_id>/` with `manifest.json`, metrics CSVs, side-by-side 10× MP4, event JSONL; viz via `python experiments/render_run.py <run_dir>/`. Elytra: **Resume incomplete** (YAML `experiment_id`) or **Fresh campaign** (`--fresh` + timestamp suffix).
 
-### 2 — Runtime robustness & memory
+### 2 — Runtime memory (after long-batch soak)
 
-**Priority:** P1 for long unattended ablations.
+1. Bridge JPEG pool unbounded queue  
+2. Coverage worker full-map churn  
+3. `maprender_node.trajectory` unbounded  
+4. Host/WSL Vmmem — cap via `~/.wslconfig` (`memory=6GB`); quit Docker when idle  
 
-Known debt (2026-09-06 audit; not yet fixed):
+### 3 — Sim2real (deferred)
 
-1. Bridge JPEG `ThreadPoolExecutor` queue is **unbounded** under bind-mount latency → RAM growth.
-2. Coverage worker reallocates full-map snapshots continuously → RSS pressure.
-3. `maprender_node.trajectory` grows without bound for the episode.
-4. Wall-unstick clearance gate (0.25 m) can miss NavFn `NO_VALID_PATH` when occupancy clearance is barely above threshold but inflated costmap blocks planning.
+RTAB-Map / VO on the real robot — not required for sim ablations.
 
-### 3 — Sim2real / perception pose (deferred)
+### Non-goals
 
-- RTAB-Map / visual odometry as mapping authority on the real robot.
-- Not required for sim ablations while privileged pose remains available.
-
-### Non-goals (still)
-
-- Concurrent multi-project Elytra / cloud multi-user.
-- Running TARE/DSVP inside Habitat (thesis used trajectory replay — defer).
-- Full 3D frontier exploration.
+- Concurrent multi-project Elytra / cloud multi-user  
+- TARE/DSVP inside Habitat (trajectory replay later)  
+- Full 3D frontier exploration  
 
 ---
 
@@ -90,29 +83,29 @@ Known debt (2026-09-06 audit; not yet fixed):
 
 | Step | Work | Gate |
 |------|------|------|
-| 1 | Lock paper eval FOV (90 vs 360) + greedy baseline semantics | Matches thesis tables |
-| 2 | Memory/robustness pass (JPEG coalesce, trajectory cap, coverage throttle, unstick gate) | Multi-hour episode without OOM / cascade stuck |
-| 3 | Scale ablation matrix (~50 seeds) + plot export | Unattended batch green |
-| 4 | Sim2real mapping (when hardware ready) | Real-robot `/grid_map` parity |
+| **1** ✓ | Artifact package + timelapse + event logs + `render_run.py` | One smoke run package ≤50 MB; pretty figures |
+| **2** ✓ | Crash-safe resume + progress UI | Kill mid-batch; restart; only unfinished cells run |
+| **2.1** ✓ | Fresh campaign UI + thrash unstick + tmux/return-home hardening | Smoke campaign can start reliably; no infinite return-home |
+| 3 | FOV 90° + true greedy + 50-seed matrix | Thesis-aligned campaign |
+| 4 | Memory hardening | Multi-hour episode without OOM |
+| 5 | Sim2real mapping | Hardware-ready |
 
 ---
 
 ## Discussion log
 
-### 2026-09-06 — Closeout before next project section
+### 2026-09-07 — B2.1 milestone closeout
 
-**Shipped this arc:** C++ PC mapper speed path; async coverage IPC; cmd_vel turn-over-drive ratio; wall-unstick + Nav2 error codes; costmap inflation 0.15 m; removed TEMP timing + TEMP wall-collision CSV instrumentation.
+Shipped campaign isolation (resume vs fresh), package layout cleanup, interrupt encode/cleanup, resilient tmux episode start, return-home guard abandon + near-goal short-circuit, and DiscreteMove thrash recovery (BACK/FWD alternating, growing steps, max 5) for occlusion traps. Next: paper-scale eval matrix.
 
-**Still open for next arc:** paper FOV/plots/greedy; memory leaks listed above; optional unstick on near-threshold `NO_VALID_PATH`.
+### 2026-09-06 — Ablation packages + resume planned as next milestone
+
+PART 1 (recording/viz) and PART 2 (crash-safe resume) before algorithm scale-up. Viz is a Python script, not a browser app.
+
+### 2026-09-06 — Mapping/nav arc closeout
+
+C++ mapper, async coverage, curvature ratio, wall-unstick, inflation 0.15 m; TEMP diags removed.
 
 ### 2026-08-31 — Goal B v1 shipped
 
-CLI + SQLite + Elytra ablation entrypoints. Remaining: FOV 90°, plots, greedy-without-VLM confirmation.
-
-### 2026-08-28 — Return-home guard
-
-After child nav failure, block sibling selection until return to scan node succeeds.
-
-### 2026-08-26 — Goal A/B approach selection
-
-A1 known-pose PC mapper selected; Goal B series orchestrator + SQLite + privileged eval.
+CLI + SQLite + Elytra ablation entrypoints.

@@ -70,6 +70,8 @@ public:
     return_home_max_attempts_ = declare_parameter<int>("return_home_max_attempts", 20);
     unstick_min_clearance_m_ = declare_parameter<double>("unstick_min_clearance_m", 0.25);
     unstick_max_steps_ = declare_parameter<int>("unstick_max_steps", 8);
+    unstick_max_attempts_ = declare_parameter<int>(
+      "unstick_max_attempts", explorer_mission::kDefaultMaxUnstickAttempts);
 
     param_callback_handle_ = add_on_set_parameters_callback(
       [this](const std::vector<rclcpp::Parameter> & params) {
@@ -709,12 +711,35 @@ private:
       return false;
     }
 
+    updateRobotPoseFromTf();
+    const double dist_m = std::hypot(
+      static_cast<double>(current_pos_.x - scan_node->position.x),
+      static_cast<double>(current_pos_.y - scan_node->position.y));
+    if (goal_accept_radius_m_ > 0.0 && dist_m <= goal_accept_radius_m_) {
+      RCLCPP_INFO(
+        get_logger(),
+        "Already within %.2f m of scan node %u (dist=%.3f); skip return-home nav",
+        goal_accept_radius_m_, scan_node->id, dist_m);
+      return_home_guard_.onReturnHomeSucceeded();
+      return true;
+    }
+
     publishPhase(
       "backtracking", tree_.currentNodeId(), scan_node->id, false,
       "nav/plan failed — return to scan node before next frontier");
 
     for (int attempt = 1; attempt <= return_home_max_attempts_; ++attempt) {
       if (navigateWithUnstickRecovery(scan_node->position, scan_node->position).ok) {
+        return_home_guard_.onReturnHomeSucceeded();
+        return true;
+      }
+
+      // Re-check proximity: unstick may have left us close enough.
+      updateRobotPoseFromTf();
+      const double d = std::hypot(
+        static_cast<double>(current_pos_.x - scan_node->position.x),
+        static_cast<double>(current_pos_.y - scan_node->position.y));
+      if (goal_accept_radius_m_ > 0.0 && d <= goal_accept_radius_m_) {
         return_home_guard_.onReturnHomeSucceeded();
         return true;
       }
@@ -726,6 +751,13 @@ private:
       rclcpp::sleep_for(std::chrono::seconds(1));
     }
 
+    // Critical: do not leave awaiting_return_ stuck true — that loops forever
+    // selecting nothing except failed return-home (cur==tgt thrash).
+    RCLCPP_ERROR(
+      get_logger(),
+      "Return to scan node %u abandoned after %d attempts; clearing return-home guard",
+      scan_node->id, return_home_max_attempts_);
+    return_home_guard_.onReturnHomeAbandoned();
     return false;
   }
 
@@ -784,45 +816,21 @@ private:
     return true;
   }
 
-  void runWallUnstick()
+  void runWallUnstick(int escalation_level)
   {
+    // Alternate BACKWARD / FORWARD with increasing step count so we can escape
+    // whether the occlusion is in front of or behind the robot (no Nav2).
+    const auto motion = explorer_mission::unstickThrashMotion(escalation_level);
+    const char * dir_name =
+      motion.direction == explorer_mission::kUnstickBackward ? "BACKWARD" : "FORWARD";
     RCLCPP_WARN(
       get_logger(),
-      "Wall unstick: gradient steps away from occupied (max %d, min_clearance=%.2f m)",
-      unstick_max_steps_, unstick_min_clearance_m_);
-    for (int i = 0; i < unstick_max_steps_; ++i) {
-      updateRobotPoseFromTf();
-      nav_msgs::msg::OccupancyGrid grid;
-      {
-        std::lock_guard<std::mutex> lock(grid_mutex_);
-        if (!have_grid_) {
-          break;
-        }
-        grid = latest_grid_;
-      }
-      const auto clearance = explorer_mission::clearanceToOccupiedM(
-        grid, current_pos_.x, current_pos_.y);
-      if (clearance.has_value() && *clearance >= unstick_min_clearance_m_) {
-        RCLCPP_INFO(
-          get_logger(), "Wall unstick: clearance %.3f m OK after %d step(s)",
-          *clearance, i);
-        return;
-      }
-      const auto grad = explorer_mission::clearanceGradientDir(
-        grid, current_pos_.x, current_pos_.y);
-      if (!grad.has_value()) {
-        RCLCPP_WARN(get_logger(), "Wall unstick: no clearance gradient; stopping");
-        return;
-      }
-      const double yaw_rad = current_yaw_deg_ * M_PI / 180.0;
-      const auto step = explorer_mission::nextUnstickStep(yaw_rad, *grad);
-      if (!step.has_value()) {
-        return;
-      }
-      if (!sendOneDiscreteMove(step->direction, step->steps)) {
-        RCLCPP_WARN(get_logger(), "Wall unstick: DiscreteMove failed; stopping");
-        return;
-      }
+      "Wall unstick attempt %d/%d: DiscreteMove %s x%d (thrash, no Nav2)",
+      escalation_level + 1, unstick_max_attempts_, dir_name, motion.steps);
+    if (!sendOneDiscreteMove(motion.direction, motion.steps)) {
+      RCLCPP_WARN(
+        get_logger(), "Wall unstick: DiscreteMove %s x%d failed",
+        dir_name, motion.steps);
     }
   }
 
@@ -833,34 +841,33 @@ private:
       return NavAttemptResult{true, false};
     }
 
-    const uint16_t code = lastNavErrorCode();
-    const double clearance = currentClearanceM();
-    auto decision = explorer_mission::decideNavFailureRecovery(
-      code, clearance, unstick_min_clearance_m_, false);
-    RCLCPP_WARN(
-      get_logger(),
-      "Nav failed (error_code=%u clearance=%.3f): unstick=%d mark=%d — %s",
-      static_cast<unsigned>(code), clearance,
-      static_cast<int>(decision.attempt_unstick),
-      static_cast<int>(decision.mark_frontier_dead),
-      navigation_mode_ == "nav2" && nav2_navigator_ ?
-      nav2_navigator_->lastError().c_str() : "n/a");
+    int unstick_attempts = 0;
+    while (true) {
+      const uint16_t code = lastNavErrorCode();
+      const double clearance = currentClearanceM();
+      auto decision = explorer_mission::decideNavFailureRecovery(
+        code, clearance, unstick_min_clearance_m_, unstick_attempts, unstick_max_attempts_);
+      RCLCPP_WARN(
+        get_logger(),
+        "Nav failed (error_code=%u clearance=%.3f attempts=%d/%d): unstick=%d mark=%d — %s",
+        static_cast<unsigned>(code), clearance,
+        unstick_attempts, unstick_max_attempts_,
+        static_cast<int>(decision.attempt_unstick),
+        static_cast<int>(decision.mark_frontier_dead),
+        navigation_mode_ == "nav2" && nav2_navigator_ ?
+        nav2_navigator_->lastError().c_str() : "n/a");
 
-    if (decision.attempt_unstick) {
-      runWallUnstick();
+      if (!decision.attempt_unstick) {
+        return NavAttemptResult{false, decision.mark_frontier_dead};
+      }
+
+      runWallUnstick(unstick_attempts);
+      ++unstick_attempts;
+
       if (navigateToPosition(goal_pos, look_at)) {
         return NavAttemptResult{true, false};
       }
-      decision = explorer_mission::decideNavFailureRecovery(
-        lastNavErrorCode(), currentClearanceM(), unstick_min_clearance_m_, true);
-      RCLCPP_WARN(
-        get_logger(),
-        "Nav retry after unstick failed (error_code=%u clearance=%.3f): mark=%d",
-        static_cast<unsigned>(lastNavErrorCode()), currentClearanceM(),
-        static_cast<int>(decision.mark_frontier_dead));
     }
-
-    return NavAttemptResult{false, decision.mark_frontier_dead};
   }
 
   bool navigateToPosition(const cv::Point2f & goal_pos, const cv::Point2f & look_at)
@@ -874,6 +881,16 @@ private:
   bool navigateToGoal(double goal_x, double goal_y, double goal_yaw_deg)
   {
     updateRobotPoseFromTf();
+    // Short-circuit before calling Nav2: goals at/near current pose (esp. return-home
+    // to the scan node we never left) otherwise send NavigateToPose to self and fail.
+    if (goal_accept_radius_m_ > 0.0) {
+      const double dist_m = std::hypot(
+        static_cast<double>(current_pos_.x) - goal_x,
+        static_cast<double>(current_pos_.y) - goal_y);
+      if (dist_m <= goal_accept_radius_m_) {
+        return true;
+      }
+    }
     if (navigation_mode_ == "nav2" && nav2_navigator_) {
       const double goal_yaw_rad = goal_yaw_deg * M_PI / 180.0;
       const bool ok = nav2_navigator_->navigateToPose(
@@ -954,6 +971,7 @@ private:
   int return_home_max_attempts_{20};
   double unstick_min_clearance_m_{0.25};
   int unstick_max_steps_{8};
+  int unstick_max_attempts_{explorer_mission::kDefaultMaxUnstickAttempts};
 
   explorer_mission::ReturnHomeGuard return_home_guard_;
 

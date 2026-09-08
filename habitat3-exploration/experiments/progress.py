@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -22,6 +23,10 @@ def default_progress() -> Dict[str, Any]:
         "phase": "",
         "complete": False,
         "cancel_requested": False,
+        "completed_prior": 0,
+        "remaining": 0,
+        "current_index": 0,
+        "resumed": False,
     }
 
 
@@ -56,7 +61,14 @@ class ProgressWriter:
         if "percent" not in fields and total > 0:
             # Weight runs evenly; within-run percent can refine later.
             data["percent"] = int(round(100.0 * count / total))
-        self.path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        if "remaining" not in fields and total > 0:
+            data["remaining"] = max(0, total - count)
+        if "current_index" not in fields:
+            data["current_index"] = count
+        # Atomic replace so a crash mid-write cannot leave truncated JSON.
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(tmp, self.path)
         return data
 
     def cancel_requested(self) -> bool:

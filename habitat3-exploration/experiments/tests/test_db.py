@@ -42,6 +42,39 @@ def test_db_roundtrip_positive(tmp_path: Path):
     assert len(db.list_runs("exp")) == 1
 
 
+def test_db_wal_mode_positive(tmp_path: Path):
+    db = ExperimentDB(tmp_path / "results.sqlite")
+    db.initialize()
+    with db.connect() as conn:
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    assert str(mode).lower() == "wal"
+
+
+def test_db_upsert_running_retry_positive(tmp_path: Path):
+    db = ExperimentDB(tmp_path / "results.sqlite")
+    db.initialize()
+    db.insert_run_start(
+        run_id="r1",
+        experiment_id="exp",
+        algorithm_id="a",
+        scene_id="s",
+        seed=0,
+        config_json="{}",
+        artifact_dir="x",
+    )
+    db.finalize_run("r1", status="interrupted")
+    db.insert_run_start(
+        run_id="r1",
+        experiment_id="exp",
+        algorithm_id="a",
+        scene_id="s",
+        seed=0,
+        config_json="{}",
+        artifact_dir="x",
+    )
+    assert db.get_run("r1").status == "running"
+
+
 def test_db_missing_run_negative(tmp_path: Path):
     db = ExperimentDB(tmp_path / "results.sqlite")
     db.initialize()
