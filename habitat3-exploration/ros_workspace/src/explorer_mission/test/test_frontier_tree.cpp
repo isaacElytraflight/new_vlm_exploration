@@ -209,6 +209,33 @@ TEST(FrontierTree, SelectBestAmong_skipsUnrated_negative)
   EXPECT_FALSE(tree.selectBestAmong({a}, nullptr, true).has_value());
 }
 
+TEST(FrontierTree, VisitedDistinctFromDead_Positive)
+{
+  explorer_mission::FrontierTree tree;
+  tree.createRoot(cv::Point2f(0.0f, 0.0f));
+  const uint32_t child = tree.addChild(0, cv::Point2f(1.0f, 0.0f), 3, false);
+  EXPECT_FALSE(tree.isVisited(child));
+  EXPECT_FALSE(tree.isDead(child));
+
+  tree.markVisited(child);
+  EXPECT_TRUE(tree.isVisited(child));
+  EXPECT_FALSE(tree.isDead(child));
+
+  tree.markFullyExplored(child);
+  EXPECT_TRUE(tree.isVisited(child));
+  EXPECT_TRUE(tree.isDead(child));
+}
+
+TEST(FrontierTree, DeadWithoutVisitStillDead_Negative)
+{
+  explorer_mission::FrontierTree tree;
+  tree.createRoot(cv::Point2f(0.0f, 0.0f));
+  const uint32_t child = tree.addChild(0, cv::Point2f(1.0f, 0.0f), 3, false);
+  tree.markFullyExplored(child);
+  EXPECT_FALSE(tree.isVisited(child));
+  EXPECT_TRUE(tree.isDead(child));
+}
+
 int main(int argc, char ** argv)
 {
   ::testing::InitGoogleTest(&argc, argv);

@@ -82,6 +82,7 @@ class KnownPosePcMapperNode(Node):
         self._max_skew_ns = int(skew_sec * 1_000_000_000)
         pending_limit = max(1, int(self.get_parameter("pending_depth_limit").value))
         inflation_m = max(0.0, float(self.get_parameter("obstacle_inflation_m").value))
+        self._resolution = resolution
         self._inflate_cells = inflation_radius_cells(resolution, inflation_m)
 
         self._range_min = float(self.get_parameter("range_min").value)
@@ -116,11 +117,24 @@ class KnownPosePcMapperNode(Node):
         self.create_subscription(CameraInfo, info_topic, self._info_cb, 10)
         self.create_subscription(Image, depth_topic, self._depth_cb, qos_profile_sensor_data)
         self.create_timer(1.0 / publish_hz, self._publish)
+        self.add_on_set_parameters_callback(self._on_set_params)
         self.get_logger().info(
             f"Known-pose PC mapper: {depth_topic} + {odom_topic} → {grid_topic} "
             f"(wall band [{self._wall_height_min:.2f}, {self._wall_height_max:.2f}] m, "
             f"subsample={self._subsample})"
         )
+
+    def _on_set_params(self, params):
+        from rcl_interfaces.msg import SetParametersResult
+
+        for p in params:
+            if p.name == "obstacle_inflation_m":
+                m = max(0.0, float(p.value))
+                self._inflate_cells = inflation_radius_cells(self._resolution, m)
+                self.get_logger().warn(
+                    f"obstacle_inflation_m set to {m:.3f} ({self._inflate_cells} cells)"
+                )
+        return SetParametersResult(successful=True)
 
     def _info_cb(self, msg: CameraInfo) -> None:
         self._fx = float(msg.k[0])

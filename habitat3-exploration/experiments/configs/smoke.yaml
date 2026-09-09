@@ -1,5 +1,6 @@
-# Goal B smoke matrix: 2 algorithms × 1 scene × 2 seeds (4 runs).
-experiment_id: smoke_vlm_vs_greedy_2026q3
+# Goal C smoke matrix: 4 brains × 1 scene × 2 seeds (8 runs).
+# Fresh Elytra campaigns use folder name ablation_run_<timestamp> (overrides this id).
+experiment_id: ablation_run
 n_runs_per_cell: 2
 timeout_s: 7200
 artifact_root: sim/data/experiments
@@ -10,9 +11,13 @@ eval:
 
 algorithms:
   - id: vlm_dfs
-    profile: exploration_policy_vlm_default
+    brain: vlm_tree_dfs
   - id: greedy_nearest
-    profile: exploration_policy_greedy
+    brain: greedy_nearest
+  - id: vlm_frontier_graph
+    brain: vlm_frontier_graph
+  - id: vlm_choice_dijkstra
+    brain: vlm_choice_dijkstra
 
 scenes:
   - JmbYfDe2QKZ

@@ -14,25 +14,31 @@ Contract reference: [habitat3-exploration/ros_workspace/design_doc.md](habitat3-
 
 ---
 
-## Current baseline (as of 2026-09-07)
+## Current baseline (as of 2026-09-08)
 
 ```text
 /depth_data + /camera_info + /odom
         → known_pose_pc_mapper (C++, default)  →  /grid_map
-        → explore_node (frontier DFS + VLM scores)   ← monolithic “brain”
+        → explore_node (thin orchestrator)
+              → ExplorationBrain plugin (brain_id)
+              → detect frontiers → brain → optional VLM → selectNextGoal
+              → 360° scan only on first visit to a frontier (visited ≠ dead)
         → Nav2 NavigateToPose  →  /cmd_vel  →  DiscreteMove (Habitat)
-        → on nav fail: explore thrash BACK/FWD DiscreteMove (×5), then mark frontier
+        → on nav fail: thrash BACK/FWD (×5) → zero-inflation retry → else mark dead
 ```
 
 | Piece | Location | Notes |
 |-------|----------|--------|
-| Mapping | C++ `known_pose_pc_mapper` (`use_pc_mapper:=true`) | Subsample 8; pose-gated integrate; Bresenham early-stop on OCCUPIED; grid inflate 0.05 m |
-| Exploration | `explore_node` | **Monolithic** frontier-tree DFS + VLM; return-home; thrash unstick |
+| Mapping | C++ `known_pose_pc_mapper` (`use_pc_mapper:=true`) | Subsample 8; pose-gated integrate; Bresenham early-stop on OCCUPIED; grid inflate 0.05 m (live-tunable) |
+| Exploration | `explore_node` + `ExplorationBrain` | Pluggable brains via `brain_id`; detect/Nav2/recovery stay in node |
+| Brains | `exploration_brain.hpp/.cpp` | `vlm_tree_dfs`, `greedy_nearest`, `vlm_frontier_graph`, `vlm_choice_dijkstra` |
+| Visited vs dead | Tree + graph brains | `visited` = arrived (one-time 360°); `dead` / `fully_explored` = abandoned |
 | Motion | `cmd_vel_to_discrete` | Drive vs turn via `|ang|/|lin|` ratio (default 1.0) |
-| Nav2 | `nav2_params.yaml` | No-recovery BT; `allow_unknown: true`; costmap inflation **0.15 m** |
-| Ablations | `experiments/` + Elytra Start/Stop Ablation | Packages + WAL resume; **Resume / Fresh** campaign UI |
+| Nav2 | `nav2_params.yaml` | No-recovery BT; `allow_unknown: true`; costmap inflation **0.15 m** (0 briefly for last-ditch) |
+| Ablations | `experiments/` + Elytra | Brain checkboxes; Fresh → `ablation_run_<ts>/`; cells `{algo}_seedN/` + `run_info.json` |
+| Event JSONL | `experiment_event_logger.py` | status, tree, vlm/scores, **brain/decision**, **brain/graph_edges**, **vlm/choice** |
 
-**Known baseline debt:** ablation `greedy_nearest` is still tree+VLM with knobs flipped (`dfs_prefer_highest=false`, `parent_to_nearest=false`) — **not** true nearest-frontier greedy. Fixing that is part of Goal **C** below, not a profile tweak.
+**Known v1 debt (Goal C follow-ups):** graph edge costs are **Euclidean kNN**, not Nav2 path cost; choice brain logs prompt/response but selection is **score-argmax** among Dijkstra candidates (not a true multi-image VLM choice query yet).
 
 ---
 
@@ -44,85 +50,116 @@ Contract reference: [habitat3-exploration/ros_workspace/design_doc.md](habitat3-
 | **B — Ablation harness v1** | 2026-08-31 | YAML matrix, SQLite, aggregate tables, Elytra ablation buttons |
 | **Nav robustness (partial)** | 2026-09-06 | Return-home; stuck policy; wall-unstick; cmd_vel ratio; inflation 0.15 m |
 | **B2 — Run packages + resume** | 2026-09-06 | Artifact package, media/events, `render_run.py`, WAL resume |
-| **B2.1 — Campaign ops + thrash recovery** | 2026-09-07 | Fresh vs resume UI; per-run scratch layout; interrupt media cleanup; tmux start retries; return-home abandon; DiscreteMove thrash BACK/FWD×growing (max 5) |
+| **B2.1 — Campaign ops + thrash recovery** | 2026-09-07 | Fresh vs resume UI; per-run scratch; interrupt cleanup; tmux retries; return-home abandon; thrash BACK/FWD×growing (max 5) |
+| **C — Swappable brains (code path)** | 2026-09-08 | Interface + 4 brains + thin explore_node + ablation `brain` wiring + event logging; **smoke campaign not yet run** |
+| **C polish — ops / scan / recovery** | 2026-09-08 | Brain enable checkboxes; visited≠dead scan gate; zero-inflation last-ditch; `ablation_run_<ts>/{algo}_seedN` naming |
 
 ---
 
 ## Open goals (primary next steps)
 
-### C — Swappable exploration brains *(co-top with paper eval)*
+### C — Swappable exploration brains — *smoke gate remaining*
 
-**Why:** Ablations must compare *algorithms*, not ROS param toggles. High-level decision-making must be pluggable so each matrix cell loads a distinct brain implementation.
+**Shipped 2026-09-08 (implementation + ops polish).** Remaining exit criterion is the live campaign.
 
-**Architecture (decision recorded 2026-09-07)**
+**Architecture (decision recorded 2026-09-07; implemented 2026-09-08)**
 
 ```text
-shared stack (keep):
-  frontier detection, mapping, Nav2, DiscreteMove, thrash recovery, packaging
+shared stack:
+  frontier detection, mapping, Nav2, DiscreteMove, thrash + zero-inflation recovery, packaging
 
-swappable brain (new):
-  ExplorationBrain interface
-    on_map / on_frontiers / on_arrived / select_next_goal / …
-  one implementation file (or package) per algorithm
-  ablation YAML → algorithm_id → brain plugin id (not ad-hoc param soup)
+swappable brain:
+  ExplorationBrain interface in exploration_brain.hpp/.cpp
+  ablation YAML → algorithms[].brain → /data/selected_brain.id → launch brain_id:=
+  Elytra checkboxes filter algorithms[] before matrix expand
 ```
-
-**Shared vs brain-owned**
 
 | Shared (orchestration) | Owned by each brain |
 |------------------------|---------------------|
-| Occupancy `/grid_map`, frontier *detection* geometry | Frontier *memory* structure (none / tree / graph) |
-| Nav2 + thrash recovery to a goal pose | Goal selection policy |
-| Episode lifecycle, metrics, media | Whether/when to call VLM and how to interpret it |
-| Ablation matrix wiring | Visited / dead / backtrack semantics |
+| Occupancy `/grid_map`, frontier *detection* geometry | Frontier *memory* (none / tree / graph) |
+| Nav2 + thrash + zero-inflation recovery | Goal selection policy |
+| Episode lifecycle, metrics, media, event publish hooks | Whether/when to call VLM |
+| Ablation matrix wiring + short package names | Visited / dead / backtrack semantics |
 
-**Algorithms to ship under this interface**
+**Algorithms**
 
-| ID (proposed) | Description | Tree? | VLM? |
-|---------------|-------------|-------|------|
-| `vlm_tree_dfs` | **Current** explore_node behavior: frontier tree DFS, numeric openness scores, highest-first (today’s default) | Yes (tree) | Yes (0–5 scores) |
-| `greedy_nearest` | **True greedy** (thesis baseline): among all live frontiers, go to the **nearest** (path length preferred; Euclidean OK for v1 if Nav2 distance deferred). **No tree. No VLM wait.** Re-detect / re-pick after each arrival. | No | No |
-| `vlm_frontier_graph` | Frontiers as a **graph**: on instantiate, link each node to **N≈5** neighbors by **Nav2 route cost** (not pure Cartesian). Degree ~3–5 after pruning. Traverse neighbor→neighbor; mark visited on arrival; pick next among *alive* neighbors via **same numeric VLM scores**. | Graph | Yes (0–5 scores) |
-| `vlm_choice_dijkstra` | **Thesis-faithful copy**: Dijkstra / graph traversal as in [aarush_thesis.pdf](aarush_thesis.pdf), but VLM is asked **which frontier to take next** (multi-image: each candidate view + overview map + “efficient explorer” instructions) instead of labeling each frontier with a scalar. | Graph + Dijkstra | Yes (**choice**, not score) |
+| ID | Status | Notes |
+|----|--------|-------|
+| `vlm_tree_dfs` | Shipped | Tree DFS + numeric VLM (alias `vlm_dfs`) |
+| `greedy_nearest` | Shipped | True Euclidean nearest; **no tree, no VLM** |
+| `vlm_frontier_graph` | Shipped (v1) | kNN graph + numeric VLM; edges logged (Euclidean cost proxy) |
+| `vlm_choice_dijkstra` | Shipped (v1) | Dijkstra neighborhood + choice JSONL; score-argmax stand-in for multi-image choice |
 
-**Refactor steps (implementation order)**
+**Refactor steps**
 
-1. Extract `ExplorationBrain` API + thin `explore_node` loop that only detects frontiers, calls brain, navigates, recovers.
-2. Lift current tree+VLM DFS into `vlm_tree_dfs` plugin (behavior parity with today’s default).
-3. Implement `greedy_nearest` (replace today’s false “greedy” profile).
-4. Implement `vlm_frontier_graph` (Nav2-distance kNN edges + numeric VLM).
-5. Implement `vlm_choice_dijkstra` (thesis procedure + multi-view VLM choice).
-6. Wire ablation `algorithms[].brain` (or `profile` → brain id) + smoke matrix cells for all four.
+1. ✓ `ExplorationBrain` API + factory  
+2. ✓ Lift tree+VLM DFS → `vlm_tree_dfs`  
+3. ✓ True `greedy_nearest`  
+4. ✓ Thin `explore_node` orchestration  
+5. ✓ `vlm_frontier_graph` (+ edge logging)  
+6. ✓ `vlm_choice_dijkstra` (+ choice logging)  
+7. ✓ Ablation `algorithms[].brain` + 4-cell smoke YAML  
+8. ✓ Brain enable checkboxes + short package naming + visited≠dead scan + zero-inflation recovery  
+9. ☐ Live smoke: 1 scene × 2 seeds × selected brains under resume/fresh  
 
 **Exit criteria**
 
-- [ ] Matrix can run ≥2 brains without recompiling knobs by hand
-- [ ] `greedy_nearest` never builds a frontier tree and never blocks on VLM
-- [ ] Graph brains log edge costs (Nav2) and visited sets in event JSONL
-- [ ] Choice brain logs VLM prompt/response + selected frontier id
-- [ ] Smoke: 1 scene × 2 seeds × 4 brains completes under resume/fresh
+- [x] Matrix can run ≥2 brains without hand-knob recompiles  
+- [x] `greedy_nearest` never builds a tree / never blocks on VLM  
+- [x] Decision + visited in event JSONL (`exploration/brain/decision`)  
+- [x] Graph brains emit edge costs (`exploration/brain/graph_edges`) — Euclidean v1  
+- [x] Choice brain emits prompt/response + selected id (`exploration/vlm/choice`) — score-argmax v1  
+- [x] Operator can disable brains in Elytra before Start Ablation  
+- [x] Packages use `ablation_run_<ts>/{algo}_seedN` + `run_info.json`  
+- [ ] Smoke: 1 scene × 2 seeds × 4 brains completes under resume/fresh  
+
+**Follow-ups after smoke (still Goal C polish, not new goals)**
+
+- Replace Euclidean kNN edge costs with Nav2 `ComputePathToPose` length  
+- True multi-image VLM *choice* query (not score-argmax)  
+- Confirm event JSONL fields in packaged runs  
 
 **Non-goals for C**
 
-- Hot-swapping brains mid-episode
-- Learning / RL policies
-- Changing mapper or Nav2 stack as part of the brain
+- Hot-swapping brains mid-episode  
+- Learning / RL policies  
+- Changing mapper or Nav2 stack as part of the brain  
+
+**Key paths**
+
+- Brains: `ros_workspace/src/explorer_mission/include|src/.../exploration_brain.*`  
+- Node: `explore_node.cpp` (`brain_id`, publish decision/edges/choice)  
+- Ablation: `experiments/profiles.py`, `configs/smoke.yaml`, `orchestrator.py`, `package.py`  
+- Launch: `start_sim.sh` reads `/data/selected_brain.id`  
+- Events: `sim/scripts/experiment_event_logger.py`, msgs `BrainDecisionEvent` / `BrainGraphEdges` / `VlmChoiceEvent`  
+- Tests: `test_exploration_brain.cpp`, `experiments/tests/test_config.py` + `test_event_log_shape.py`  
+
+**Package layout (Fresh campaign)**
+
+```text
+sim/data/experiments/ablation_run_<YYYYMMDD_HHMMSS>/
+  campaign_info.json
+  greedy_nearest_seed0/
+    run_info.json    # scene, brain, env, eval
+    manifest.json
+    metrics/ media/ logs/
+  vlm_dfs_seed0/
+  …
+```
 
 ---
 
-### 1 — Paper-ready evaluation *(co-top with C)*
-
-Depends on **C** for honest algorithm cells. After brains exist:
+### 1 — Paper-ready evaluation *(co-top; unblocked once C smoke is green)*
 
 | Gap | Notes |
 |-----|--------|
 | Privileged FOV 90° | Radius wired; FOV mode still open |
 | Scale to ~50 seeds / cell | Smoke packages + resume/fresh proven; next is matrix scale |
-| Thesis-aligned matrix | Include true greedy + tree VLM + graph VLM + choice VLM |
+| Thesis-aligned matrix | Four brains exist; need green smoke then scale |
 
 **Eval rule:** Paper coverage stays decoupled from perception `/grid_map` (privileged Habitat reveal).
 
-**Package reminder (shipped):** each run under `sim/data/experiments/<exp>/<run_id>/` with `manifest.json`, metrics CSVs, side-by-side 10× MP4, event JSONL; viz via `python experiments/render_run.py <run_dir>/`. Elytra: **Resume incomplete** (YAML `experiment_id`) or **Fresh campaign** (`--fresh` + timestamp suffix).
+**Package reminder (shipped):** Fresh → `sim/data/experiments/ablation_run_<ts>/{algo}_seedN/` with `run_info.json`, `manifest.json`, metrics CSVs, side-by-side 10× MP4, event JSONL; viz via `python experiments/render_run.py <run_dir>/`. Elytra: brain checkboxes + **Resume incomplete** or **Fresh campaign**.
 
 ---
 
@@ -149,11 +186,13 @@ RTAB-Map / VO on the real robot — not required for sim ablations.
 
 | Step | Work | Gate |
 |------|------|------|
-| **1** ✓ | Artifact package + timelapse + event logs + `render_run.py` | One smoke run package ≤50 MB; pretty figures |
-| **2** ✓ | Crash-safe resume + progress UI | Kill mid-batch; restart; only unfinished cells run |
-| **2.1** ✓ | Fresh campaign UI + thrash unstick + tmux/return-home hardening | Smoke campaign can start reliably; no infinite return-home |
-| **3** | **Swappable brains (Goal C)** — interface + lift tree DFS + true greedy | Ablation cell selects a brain file/plugin; greedy has no tree/VLM |
-| **4** | Graph + numeric VLM brain; thesis choice+Dijkstra brain | Four-way smoke matrix green |
+| **1** ✓ | Artifact package + timelapse + event logs + `render_run.py` | One smoke run package ≤50 MB |
+| **2** ✓ | Crash-safe resume + progress UI | Kill mid-batch; only unfinished cells run |
+| **2.1** ✓ | Fresh campaign UI + thrash unstick + tmux/return-home hardening | Reliable smoke start |
+| **3** ✓ | Swappable brains code (Goal C) — 4 brains + wiring + logging | Unit tests green; smoke YAML ready |
+| **3.0.1** ✓ | Brain checkboxes, visited≠dead scans, zero-inflation, short names | Ops polish before smoke |
+| **3.1** | **Live multi-brain smoke** | Selected brains × seeds complete under Fresh/Resume; events in packages |
+| **4** | Nav2 edge costs + true multi-image VLM choice | Thesis-faithful graph/choice |
 | **5** | FOV 90° + 50-seed paper matrix | Thesis-aligned campaign |
 | **6** | Memory hardening | Multi-hour episode without OOM |
 | **7** | Sim2real mapping | Hardware-ready |
@@ -162,21 +201,45 @@ RTAB-Map / VO on the real robot — not required for sim ablations.
 
 ## Discussion log
 
+### 2026-09-08 — Goal C ops polish (evening)
+
+1. **Ablation brain checkboxes** — enable/disable algorithms before Start Ablation (`--algorithms` → `filter_algorithms`).  
+2. **Visited ≠ dead** — 360° only on unvisited frontiers; backtrack to visited-alive skips rescan.  
+3. **Zero-inflation last-ditch** — after thrash ×5, retry NavigateToPose with Nav2 + mapper inflation 0; then mark dead.  
+4. **Package naming** — `ablation_run_<timestamp>/{algorithm_id}_seed{N}/` + `run_info.json` / `campaign_info.json`.
+
+### 2026-09-08 — Goal C implementation session (full day)
+
+Implemented Goal C end-to-end in code; **awaiting live smoke**.
+
+**What shipped**
+
+1. **`ExplorationBrain` API + factory** — `createExplorationBrain(id, config)`; aliases `vlm_dfs` → `vlm_tree_dfs`.  
+2. **Four brains** in `exploration_brain.cpp`: tree DFS+VLM; true greedy; frontier graph + numeric VLM; Dijkstra neighborhood + choice logging.  
+3. **Thin `explore_node`** — detect → brain → optional VLM → navigate/recover; param `brain_id`.  
+4. **Ablation wiring** — `algorithms[].brain`; orchestrator writes `/data/selected_brain.id`; `start_sim.sh` passes launch arg; legacy `exploration_policy_greedy` → true greedy.  
+5. **Event JSONL** — ROS msgs + logger for `brain/decision` (incl. visited/live), `brain/graph_edges`, `vlm/choice`.  
+6. **Smoke config** — `experiments/configs/smoke.yaml`: 4 brains × 1 scene × 2 seeds (8 runs); Fresh folders are `ablation_run_<ts>`.
+
+**Honest v1 limits:** Euclidean (not Nav2) graph costs; choice is score-argmax with logged prompt/response (not multi-image single-query VLM yet).
+
+**Next:** run Fresh smoke in Elytra; verify packages + event fields; then paper-eval scale / Nav2+true-choice polish.
+
 ### 2026-09-07 — Swappable brains become co-top priority
 
-Today’s “greedy” ablation is a mislabeled tree+VLM variant. Next architecture: pluggable `ExplorationBrain` with four implementations — (1) current tree DFS+scores, (2) true nearest-frontier greedy (no tree, no VLM), (3) Nav2-distance frontier graph + numeric VLM, (4) thesis Dijkstra/graph + VLM *choice* over labeled frontier images + map overview. Paper eval waits on honest algorithm cells.
+Today’s “greedy” ablation was a mislabeled tree+VLM variant. Architecture: pluggable `ExplorationBrain` with four implementations. Paper eval waits on honest algorithm cells. *(Implemented 2026-09-08.)*
 
 ### 2026-09-07 — B2.1 milestone closeout
 
-Shipped campaign isolation (resume vs fresh), package layout cleanup, interrupt encode/cleanup, resilient tmux episode start, return-home guard abandon + near-goal short-circuit, and DiscreteMove thrash recovery (BACK/FWD alternating, growing steps, max 5) for occlusion traps.
+Campaign isolation (resume vs fresh), package layout, interrupt encode/cleanup, resilient tmux start, return-home abandon, DiscreteMove thrash recovery.
 
 ### 2026-09-06 — Ablation packages + resume planned as next milestone
 
-PART 1 (recording/viz) and PART 2 (crash-safe resume) before algorithm scale-up. Viz is a Python script, not a browser app.
+PART 1 (recording/viz) and PART 2 (crash-safe resume) before algorithm scale-up.
 
 ### 2026-09-06 — Mapping/nav arc closeout
 
-C++ mapper, async coverage, curvature ratio, wall-unstick, inflation 0.15 m; TEMP diags removed.
+C++ mapper, async coverage, curvature ratio, wall-unstick, inflation 0.15 m.
 
 ### 2026-08-31 — Goal B v1 shipped
 

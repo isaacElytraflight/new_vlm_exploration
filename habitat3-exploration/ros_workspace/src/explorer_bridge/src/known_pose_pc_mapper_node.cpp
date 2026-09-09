@@ -13,6 +13,7 @@
 
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
@@ -84,7 +85,8 @@ public:
     max_skew_ns_ = static_cast<int64_t>(skew_sec * 1e9);
     pending_limit_ = std::max(1, static_cast<int>(get_parameter("pending_depth_limit").as_int()));
     const double inflation_m = std::max(0.0, get_parameter("obstacle_inflation_m").as_double());
-    inflate_cells_ = inflationRadiusCells(resolution, inflation_m);
+    resolution_ = resolution;
+    inflate_cells_ = inflationRadiusCells(resolution_, inflation_m);
 
     params_.range_min = get_parameter("range_min").as_double();
     params_.range_max = get_parameter("range_max").as_double();
@@ -117,6 +119,22 @@ public:
     timer_ = create_wall_timer(
       std::chrono::duration<double>(1.0 / publish_hz),
       [this]() {publishGrid();});
+
+    param_cb_ = add_on_set_parameters_callback(
+      [this](const std::vector<rclcpp::Parameter> & params) {
+        rcl_interfaces::msg::SetParametersResult result;
+        result.successful = true;
+        for (const auto & p : params) {
+          if (p.get_name() == "obstacle_inflation_m") {
+            const double m = std::max(0.0, p.as_double());
+            inflate_cells_ = inflationRadiusCells(resolution_, m);
+            RCLCPP_WARN(
+              get_logger(),
+              "obstacle_inflation_m set to %.3f (%d cells)", m, inflate_cells_);
+          }
+        }
+        return result;
+      });
 
     RCLCPP_INFO(
       get_logger(),
@@ -279,6 +297,7 @@ private:
   int64_t max_skew_ns_{0};
   int pending_limit_{128};
   int inflate_cells_{0};
+  double resolution_{0.05};
   double min_pose_change_m_{0.25};
   double min_yaw_change_rad_{0.17};
   bool have_info_{false};
@@ -293,6 +312,7 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr info_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_;
 };
 
 }  // namespace explorer_bridge

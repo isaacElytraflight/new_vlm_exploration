@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterator, List
 
 import yaml
 
-from experiments.profiles import ExplorationProfile, get_profile
+from experiments.profiles import ExplorationProfile, resolve_algorithm_profile
 
 
 DEFAULT_SCENE_ROOT = "/data/scene_datasets/mp3d"
@@ -94,6 +94,28 @@ def expand_seeds(seeds_cfg: Dict[str, Any], n_runs_per_cell: int) -> List[int]:
     raise ValueError(f"unsupported seeds.mode: {mode!r}")
 
 
+def filter_algorithms(
+    algorithms: List[Dict[str, str]],
+    selected_ids: List[str] | None,
+) -> List[Dict[str, str]]:
+    """Keep algorithms whose id is in selected_ids (order preserved).
+
+    None or empty selected_ids means keep all. Unknown ids raise ValueError.
+    """
+    if not selected_ids:
+        return list(algorithms)
+    wanted = [str(x).strip() for x in selected_ids if str(x).strip()]
+    if not wanted:
+        return list(algorithms)
+    by_id = {str(a.get("id", "")): a for a in algorithms}
+    missing = [aid for aid in wanted if aid not in by_id]
+    if missing:
+        raise ValueError(f"unknown algorithm id(s): {', '.join(missing)}")
+    # Preserve YAML order among the enabled subset.
+    wanted_set = set(wanted)
+    return [a for a in algorithms if str(a.get("id", "")) in wanted_set]
+
+
 def expand_matrix(config: ExperimentConfig) -> Iterator[RunSpec]:
     if not config.algorithms:
         raise ValueError("algorithms[] must not be empty")
@@ -103,8 +125,7 @@ def expand_matrix(config: ExperimentConfig) -> Iterator[RunSpec]:
     seeds = expand_seeds(config.seeds, config.n_runs_per_cell)
     for algo in config.algorithms:
         algorithm_id = str(algo["id"])
-        profile_id = str(algo.get("profile", algorithm_id))
-        profile = get_profile(profile_id)
+        profile = resolve_algorithm_profile(algo)
         for scene_id in config.scenes:
             scene_path = resolve_scene_path(scene_id, scene_root=config.scene_root)
             for seed in seeds:
@@ -122,13 +143,30 @@ def expand_matrix(config: ExperimentConfig) -> Iterator[RunSpec]:
 
 
 def run_id_for(spec: RunSpec) -> str:
-    return f"{spec.experiment_id}__{spec.algorithm_id}__{spec.scene_id}__seed{spec.seed}"
+    """Short per-cell folder / DB id: ``{algorithm_id}_seed{seed}``.
+
+    Scene / campaign metadata lives in ``run_info.json``, not the folder name.
+    """
+    return f"{spec.algorithm_id}_seed{spec.seed}"
+
+
+def make_ablation_experiment_id(stamp: str | None = None) -> str:
+    """Campaign folder name: ``ablation_run_<YYYYMMDD_HHMMSS>``."""
+    from datetime import datetime
+
+    raw = (stamp or "").strip().lstrip("_")
+    if not raw or raw == "ablation_run":
+        return f"ablation_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    if raw.startswith("ablation_run_"):
+        return raw
+    return f"ablation_run_{raw}"
 
 
 def frozen_config_json(spec: RunSpec) -> str:
     payload = {
         "experiment_id": spec.experiment_id,
         "algorithm_id": spec.algorithm_id,
+        "brain_id": spec.profile.brain_id,
         "profile": spec.profile.to_dict(),
         "scene_id": spec.scene_id,
         "scene_path": spec.scene_path,

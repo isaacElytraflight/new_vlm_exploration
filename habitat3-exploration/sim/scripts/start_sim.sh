@@ -96,4 +96,12 @@ pkill -f "elytra_view_server.py" 2>/dev/null || true
 ) &
 VIEW_SERVER_PID=$!
 
-exec ros2 launch explorer_mission nav2_exploration.launch.py driver_backend:=habitat
+# Exploration brain (Goal C): prefer ablation file, then env, then default.
+BRAIN_ID="${EXPLORER_BRAIN_ID:-vlm_tree_dfs}"
+if [ -f /data/selected_brain.id ]; then
+  BRAIN_ID="$(tr -d '\r\n' < /data/selected_brain.id)"
+fi
+
+exec ros2 launch explorer_mission nav2_exploration.launch.py \
+  driver_backend:=habitat \
+  brain_id:="$BRAIN_ID"

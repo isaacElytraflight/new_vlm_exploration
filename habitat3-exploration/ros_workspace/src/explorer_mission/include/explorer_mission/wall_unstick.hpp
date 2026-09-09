@@ -27,23 +27,27 @@ constexpr int kDefaultMaxUnstickAttempts = 5;
 struct UnstickDecision
 {
   bool attempt_unstick{false};
+  /// After thrash budget exhausted: one NavigateToPose with zero costmap inflation.
+  bool attempt_zero_inflation{false};
   bool mark_frontier_dead{false};
 };
 
 /// Recovery policy after NavigateToPose failure.
 ///
 /// @param unstick_attempts how many thrash recoveries already ran for this goal
-/// @param max_unstick_attempts budget before marking dead (default 5)
+/// @param max_unstick_attempts budget before zero-inflation last ditch (default 5)
+/// @param zero_inflation_done whether the deflated-costmap retry already ran
 ///
 /// Thrash DiscreteMove (back/forward, growing steps) on START_OCCUPIED / low
-/// clearance / NO_VALID_PATH while attempts remain. Mark on GOAL_OCCUPIED,
-/// exhausted budget, or generic stuck.
+/// clearance / NO_VALID_PATH while attempts remain. After thrash budget, try
+/// zero inflation once. Mark on GOAL_OCCUPIED, exhausted recovery, or generic stuck.
 UnstickDecision decideNavFailureRecovery(
   uint16_t error_code,
   double clearance_m,
   double min_clearance_m,
   int unstick_attempts = 0,
-  int max_unstick_attempts = kDefaultMaxUnstickAttempts);
+  int max_unstick_attempts = kDefaultMaxUnstickAttempts,
+  bool zero_inflation_done = false);
 
 /// One recovery DiscreteMove: alternate BACKWARD / FORWARD with growing steps.
 /// attempt 0: BACK×1, 1: FWD×1, 2: BACK×2, 3: FWD×2, 4: BACK×3, …

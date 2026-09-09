@@ -81,7 +81,8 @@ UnstickDecision decideNavFailureRecovery(
   double clearance_m,
   double min_clearance_m,
   int unstick_attempts,
-  int max_unstick_attempts)
+  int max_unstick_attempts,
+  bool zero_inflation_done)
 {
   const int max_attempts = std::max(0, max_unstick_attempts);
   const int attempts = std::max(0, unstick_attempts);
@@ -95,16 +96,19 @@ UnstickDecision decideNavFailureRecovery(
   const bool recoverable = start_invalid || no_path;
 
   if (goal_invalid) {
-    return UnstickDecision{false, true};
+    return UnstickDecision{false, false, true};
   }
   if (recoverable && attempts < max_attempts) {
-    return UnstickDecision{true, false};
+    return UnstickDecision{true, false, false};
   }
-  if (recoverable && attempts >= max_attempts) {
-    return UnstickDecision{false, true};
+  if (recoverable && attempts >= max_attempts && !zero_inflation_done) {
+    return UnstickDecision{false, true, false};
+  }
+  if (recoverable && attempts >= max_attempts && zero_inflation_done) {
+    return UnstickDecision{false, false, true};
   }
   // Stuck / timeout / unknown: keep prior tree-progress behavior (mark).
-  return UnstickDecision{false, true};
+  return UnstickDecision{false, false, true};
 }
 
 UnstickThrashMotion unstickThrashMotion(int attempt_index)

@@ -26,7 +26,7 @@ eval:
   reveal_radius_m: 5.0
 algorithms:
   - id: vlm_dfs
-    profile: exploration_policy_vlm_default
+    brain: vlm_tree_dfs
 scenes:
   - 17DRP5sb8fy
 seeds:

@@ -19,6 +19,7 @@ def generate_launch_description() -> LaunchDescription:
     frontier_detection_radius = LaunchConfiguration("frontier_detection_radius")
     frontier_exclusion_radius = LaunchConfiguration("frontier_exclusion_radius")
     publish_debug_topics = LaunchConfiguration("publish_debug_topics")
+    brain_id = LaunchConfiguration("brain_id")
 
     bridge_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
@@ -47,6 +48,7 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("frontier_detection_radius", default_value="50.0"),
         DeclareLaunchArgument("frontier_exclusion_radius", default_value="1.0"),
         DeclareLaunchArgument("publish_debug_topics", default_value="false"),
+        DeclareLaunchArgument("brain_id", default_value="vlm_tree_dfs"),
 
         bridge_launch,
 
@@ -92,6 +94,7 @@ def generate_launch_description() -> LaunchDescription:
                 "frontier_detection_radius": frontier_detection_radius,
                 "frontier_exclusion_radius": frontier_exclusion_radius,
                 "publish_debug_topics": publish_debug_topics,
+                "brain_id": brain_id,
                 "dfs_prefer_highest_openness": True,
             }],
             output="screen",

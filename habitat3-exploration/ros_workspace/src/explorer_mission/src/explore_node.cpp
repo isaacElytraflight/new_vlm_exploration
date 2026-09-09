@@ -10,8 +10,10 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <unordered_map>
 #include <unordered_set>
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp/parameter_client.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <tf2/LinearMath/Matrix3x3.h>
@@ -29,14 +31,17 @@
 
 #include <explorer_msgs/action/discrete_move.hpp>
 #include <explorer_msgs/action/rotate360.hpp>
+#include <explorer_msgs/msg/brain_decision_event.hpp>
+#include <explorer_msgs/msg/brain_graph_edges.hpp>
 #include <explorer_msgs/msg/exploration_status.hpp>
 #include <explorer_msgs/msg/frontier_openness_scores.hpp>
 #include <explorer_msgs/msg/frontier_tree.hpp>
 #include <explorer_msgs/msg/frontier_views.hpp>
+#include <explorer_msgs/msg/vlm_choice_event.hpp>
 
 #include "explorer_mission/discrete_navigator.hpp"
+#include "explorer_mission/exploration_brain.hpp"
 #include "explorer_mission/frontier_detection.hpp"
-#include "explorer_mission/frontier_tree.hpp"
 #include "explorer_mission/nav2_navigator.hpp"
 #include "explorer_mission/return_home_guard.hpp"
 #include "explorer_mission/stuck_progress.hpp"
@@ -63,6 +68,7 @@ public:
     min_contour_pixels_ = declare_parameter<int>("min_contour_pixels", 15);
     vlm_scores_timeout_s_ = declare_parameter<double>("vlm_scores_timeout_s", 300.0);
     publish_debug_topics_ = declare_parameter<bool>("publish_debug_topics", false);
+    brain_id_ = declare_parameter<std::string>("brain_id", "vlm_tree_dfs");
     dfs_prefer_highest_openness_ = declare_parameter<bool>("dfs_prefer_highest_openness", true);
     goal_accept_radius_m_ = declare_parameter<double>("goal_accept_radius_m", 1.0);
     parent_to_nearest_node_ = declare_parameter<bool>("parent_to_nearest_node", true);
@@ -73,22 +79,38 @@ public:
     unstick_max_attempts_ = declare_parameter<int>(
       "unstick_max_attempts", explorer_mission::kDefaultMaxUnstickAttempts);
 
+    {
+      explorer_mission::ExplorationBrainConfig cfg;
+      cfg.dfs_prefer_highest_openness = dfs_prefer_highest_openness_;
+      cfg.parent_to_nearest_node = parent_to_nearest_node_;
+      brain_ = explorer_mission::createExplorationBrain(brain_id_, cfg);
+    }
+
     param_callback_handle_ = add_on_set_parameters_callback(
       [this](const std::vector<rclcpp::Parameter> & params) {
         rcl_interfaces::msg::SetParametersResult result;
         result.successful = true;
+        bool refresh_config = false;
         for (const auto & p : params) {
           if (p.get_name() == "dfs_prefer_highest_openness") {
             dfs_prefer_highest_openness_ = p.as_bool();
+            refresh_config = true;
             RCLCPP_INFO(
               get_logger(), "dfs_prefer_highest_openness set to %s",
               dfs_prefer_highest_openness_ ? "true (highest first)" : "false (lowest first)");
           } else if (p.get_name() == "parent_to_nearest_node") {
             parent_to_nearest_node_ = p.as_bool();
+            refresh_config = true;
             RCLCPP_INFO(
               get_logger(), "parent_to_nearest_node set to %s",
               parent_to_nearest_node_ ? "true" : "false");
           }
+        }
+        if (refresh_config && brain_) {
+          explorer_mission::ExplorationBrainConfig cfg;
+          cfg.dfs_prefer_highest_openness = dfs_prefer_highest_openness_;
+          cfg.parent_to_nearest_node = parent_to_nearest_node_;
+          brain_->setConfig(cfg);
         }
         return result;
       });
@@ -114,6 +136,12 @@ public:
       "exploration/frontier_tree", latched);
     status_pub_ = create_publisher<explorer_msgs::msg::ExplorationStatus>(
       "exploration/status", latched);
+    brain_decision_pub_ = create_publisher<explorer_msgs::msg::BrainDecisionEvent>(
+      "exploration/brain/decision", latched);
+    brain_graph_edges_pub_ = create_publisher<explorer_msgs::msg::BrainGraphEdges>(
+      "exploration/brain/graph_edges", latched);
+    vlm_choice_pub_ = create_publisher<explorer_msgs::msg::VlmChoiceEvent>(
+      "exploration/vlm/choice", latched);
     vlm_views_pub_ = create_publisher<explorer_msgs::msg::FrontierViews>(
       "exploration/vlm/views", rclcpp::QoS(1));
 
@@ -124,7 +152,8 @@ public:
         "exploration/debug/last_vlm_batch", rclcpp::QoS(1));
     }
 
-    RCLCPP_INFO(get_logger(), "Explore node initializing (frontier tree mode)...");
+    RCLCPP_INFO(
+      get_logger(), "Explore node initializing (brain_id=%s)...", brain_id_.c_str());
   }
 
   bool waitForDependencies()
@@ -195,138 +224,104 @@ public:
 
   void startExploration()
   {
-    RCLCPP_INFO(get_logger(), "Exploration started");
+    RCLCPP_INFO(get_logger(), "Exploration started (brain=%s)", brain_->id().c_str());
     updateRobotPoseFromTf();
+    brain_->onEpisodeStart(current_pos_);
+    scanned_detect_keys_.clear();
+    scan_poses_.clear();
+    greedy_visited_poses_.clear();
+    greedy_detect_key_ = 0;
+
+    // Initial 360° at episode start (root / spawn is still unvisited).
     publishPhase("scanning", 0, 0, false, "initial scan");
-    performScanIfNeeded();
-    tree_.createRoot(current_pos_);
-    tree_.setCurrentNodeId(tree_.rootId());
-    scanned_node_ids_.clear();
-    last_new_child_ids_.clear();
+    performScanIfNeeded(/*force=*/true);
+    // Mark spawn / root visited so return-home / backtrack does not re-scan.
+    if (brain_->usesFrontierTree() && !brain_->isVisited(statusNodeId())) {
+      brain_->onArrived(statusNodeId(), current_pos_);
+    }
     publishTree();
-    publishPhase("idle", tree_.currentNodeId(), 0, false, "root created");
+    publishPhase("idle", statusNodeId(), 0, false, "episode start");
 
     while (rclcpp::ok()) {
       updateRobotPoseFromTf();
-      performScanIfNeeded();
 
-      explorer_mission::TreeNode * current = tree_.find(tree_.currentNodeId());
-      if (!current) {
-        RCLCPP_ERROR(get_logger(), "Current tree node missing; stopping.");
-        break;
-      }
-
-      if (scanned_node_ids_.count(current->id) == 0) {
-        if (!detectAndRateChildren()) {
+      const uint32_t detect_key = detectKey();
+      if (scanned_detect_keys_.count(detect_key) == 0) {
+        if (!detectAndOfferToBrain()) {
           RCLCPP_WARN(get_logger(), "Frontier detection/VLM rating failed; retrying.");
           rclcpp::sleep_for(std::chrono::seconds(1));
           continue;
         }
-        scanned_node_ids_.insert(tree_.currentNodeId());
-        current = tree_.find(tree_.currentNodeId());
-        if (!current) {
-          break;
-        }
-      }
-
-      if (!tree_.hasUnexploredChildren(current->id)) {
-        // Only when nearest-parent attached frontiers under other nodes.
-        if (parent_to_nearest_node_) {
-          const auto batch_pick = tree_.selectBestAmong(
-            last_new_child_ids_, nullptr, dfs_prefer_highest_openness_);
-          if (batch_pick.has_value()) {
-            explorer_mission::TreeNode * batch_child = tree_.find(*batch_pick);
-            if (batch_child && !batch_child->fully_explored &&
-              batch_child->openness_score != explorer_mission::kOpennessNotRated)
-            {
-              publishPhase(
-                "navigating", current->id, *batch_pick, false,
-                "batch/nearest child score=" + std::to_string(batch_child->openness_score));
-              const auto nav = navigateWithUnstickRecovery(
-                batch_child->position, batch_child->position);
-              if (!nav.ok) {
-                if (nav.mark_frontier_dead) {
-                  tree_.markFullyExplored(*batch_pick);
-                  publishTree();
-                }
-                return_home_guard_.onChildNavFailed(current->id);
-                returnToScanNodeWithRetry(current);
-                continue;
-              }
-              tree_.setCurrentNodeId(*batch_pick);
-              last_new_child_ids_.clear();
-              publishTree();
-              continue;
-            }
-          }
-        }
-
-        tree_.markFullyExplored(current->id);
-        publishTree();
-        if (!tree_.hasUnexploredNodesExcluding(current->id, tree_.rootId())) {
-          publishPhase(
-            "complete", current->id, 0, true,
-            "exploration complete (in place)");
-          break;
-        }
-
-        if (current->parent_id < 0) {
-          publishPhase("complete", current->id, 0, true, "root exhausted");
-          break;
-        }
-
-        const uint32_t parent_id = static_cast<uint32_t>(current->parent_id);
-        explorer_mission::TreeNode * parent = tree_.find(parent_id);
-        if (!parent) {
-          RCLCPP_ERROR(get_logger(), "Parent node %u missing; stopping.", parent_id);
-          break;
-        }
-
-        publishPhase(
-          "backtracking", current->id, parent_id, false,
-          "returning to parent");
-        if (!navigateWithUnstickRecovery(parent->position, parent->position).ok) {
-          RCLCPP_WARN(get_logger(), "Backtrack navigation failed toward parent %u.", parent_id);
-        }
-        tree_.setCurrentNodeId(parent_id);
-        publishTree();
-        continue;
+        scanned_detect_keys_.insert(detect_key);
+        scan_poses_[detect_key] = current_pos_;
       }
 
       if (return_home_guard_.isAwaitingReturn()) {
-        returnToScanNodeWithRetry(current);
+        const uint32_t scan_id = return_home_guard_.scanNodeId();
+        const cv::Point2f scan_pose = scanPoseFor(scan_id);
+        returnToScanPoseWithRetry(scan_id, scan_pose);
         continue;
       }
 
-      const auto child_id = tree_.selectNextChild(
-        current->id, nullptr, dfs_prefer_highest_openness_);
-      if (!child_id.has_value()) {
+      explorer_mission::BrainDecision decision =
+        brain_->selectNextGoal(explorer_mission::BrainContext{current_pos_});
+      if (decision.action == explorer_mission::BrainAction::kWait) {
+        // Detect path should have blocked on VLM; soft-fail leftover unrated.
+        RCLCPP_WARN(get_logger(), "Brain waiting on scores; soft-failing unrated");
+        brain_->softFailUnrated(1);
+        publishTree();
+        decision = brain_->selectNextGoal(explorer_mission::BrainContext{current_pos_});
+      }
+
+      publishBrainDecision(decision);
+      publishPendingBrainTelemetry();
+
+      if (decision.action == explorer_mission::BrainAction::kComplete) {
+        publishPhase("complete", statusNodeId(), 0, true, decision.detail);
+        break;
+      }
+
+      if (decision.action != explorer_mission::BrainAction::kNavigateTo) {
+        RCLCPP_WARN(get_logger(), "Unexpected brain action; retrying.");
+        rclcpp::sleep_for(std::chrono::milliseconds(200));
         continue;
       }
 
-      explorer_mission::TreeNode * child = tree_.find(*child_id);
-      if (!child) {
-        continue;
-      }
-
+      const uint32_t from_id = detectKey();
+      const bool is_backtrack = decision.detail.find("backtrack") != std::string::npos;
       publishPhase(
-        "navigating", current->id, *child_id, false,
-        "selected child score=" + std::to_string(child->openness_score));
+        is_backtrack ? "backtracking" : "navigating",
+        from_id, decision.goal_id, false, decision.detail);
 
-      const auto nav = navigateWithUnstickRecovery(child->position, child->position);
+      const auto nav = navigateWithUnstickRecovery(decision.goal, decision.goal);
       if (!nav.ok) {
-        if (nav.mark_frontier_dead) {
-          tree_.markFullyExplored(*child_id);
+        if (is_backtrack) {
+          // Parity with old loop: adopt parent as current even if nav failed.
+          brain_->onArrived(decision.goal_id, decision.goal);
           publishTree();
+          continue;
         }
-        return_home_guard_.onChildNavFailed(current->id);
-        returnToScanNodeWithRetry(current);
+        brain_->onNavFailed(decision.goal_id, nav.mark_frontier_dead);
+        publishTree();
+        return_home_guard_.onChildNavFailed(from_id);
+        returnToScanPoseWithRetry(from_id, scanPoseFor(from_id));
         continue;
       }
 
-      tree_.setCurrentNodeId(*child_id);
+      const bool already_visited = brain_->isVisited(decision.goal_id);
+      brain_->onArrived(decision.goal_id, decision.goal);
+      if (!brain_->usesFrontierTree()) {
+        greedy_visited_poses_.push_back(decision.goal);
+        greedy_detect_key_ = decision.goal_id;
+      }
       publishTree();
-      publishPhase("scanning", *child_id, 0, false, "arrived at child");
+      // 360° only on first visit; visited-but-alive (e.g. backtrack) skips rescan.
+      if (explorer_mission::shouldPerformFrontierScan(already_visited)) {
+        publishPhase("scanning", decision.goal_id, 0, false, "arrived at unvisited frontier");
+        performScanIfNeeded(/*force=*/true);
+      } else {
+        publishPhase("idle", decision.goal_id, 0, false, "skip scan (visited alive)");
+      }
     }
 
     RCLCPP_INFO(get_logger(), "Exploration completed");
@@ -345,25 +340,138 @@ private:
     std::lock_guard<std::mutex> lock(scores_mutex_);
     latest_scores_ = *msg;
     scores_received_ = true;
+    std::unordered_map<uint32_t, uint8_t> batch;
     for (size_t i = 0; i < msg->frontier_ids.size() && i < msg->scores.size(); ++i) {
       const uint32_t id = msg->frontier_ids[i];
       accumulated_scores_[id] = msg->scores[i];
+      batch[id] = msg->scores[i];
       if (i < msg->reasonings.size()) {
         accumulated_reasonings_[id] = msg->reasonings[i];
       }
-      // Apply as scores stream in (early-nav + late completions after leave wait).
-      tree_.setOpennessScore(id, msg->scores[i]);
+    }
+    if (brain_ && !batch.empty()) {
+      brain_->onVlmScores(batch);
     }
     publishTree();
   }
 
+  uint32_t detectKey() const
+  {
+    if (brain_ && brain_->usesFrontierTree() && brain_->frontierTree()) {
+      return brain_->frontierTree()->currentNodeId();
+    }
+    return greedy_detect_key_;
+  }
+
+  uint32_t statusNodeId() const
+  {
+    return detectKey();
+  }
+
+  cv::Point2f scanPoseFor(uint32_t scan_id) const
+  {
+    const auto it = scan_poses_.find(scan_id);
+    if (it != scan_poses_.end()) {
+      return it->second;
+    }
+    return current_pos_;
+  }
+
   void publishTree()
   {
+    if (!tree_pub_) {
+      return;
+    }
+    const explorer_mission::FrontierTree * tree =
+      brain_ ? brain_->frontierTree() : nullptr;
+    if (!tree) {
+      return;
+    }
     const rclcpp::Time stamp = now();
     const int64_t total_ns = stamp.nanoseconds();
     const int32_t sec = static_cast<int32_t>(total_ns / 1000000000LL);
     const uint32_t nsec = static_cast<uint32_t>(total_ns % 1000000000LL);
-    tree_pub_->publish(tree_.toMsg(map_frame_, sec, nsec));
+    tree_pub_->publish(tree->toMsg(map_frame_, sec, nsec));
+  }
+
+  void publishPendingGraphEdges()
+  {
+    if (!brain_graph_edges_pub_ || !brain_) {
+      return;
+    }
+    const auto edges = brain_->takePendingGraphEdges();
+    if (edges.empty()) {
+      return;
+    }
+    explorer_msgs::msg::BrainGraphEdges msg;
+    msg.header.stamp = now();
+    msg.header.frame_id = map_frame_;
+    msg.brain_id = brain_->id();
+    msg.from_ids.reserve(edges.size());
+    msg.to_ids.reserve(edges.size());
+    msg.costs.reserve(edges.size());
+    for (const auto & e : edges) {
+      msg.from_ids.push_back(e.from_id);
+      msg.to_ids.push_back(e.to_id);
+      msg.costs.push_back(e.cost);
+    }
+    brain_graph_edges_pub_->publish(msg);
+  }
+
+  void publishPendingVlmChoice()
+  {
+    if (!vlm_choice_pub_ || !brain_) {
+      return;
+    }
+    const auto rec = brain_->takePendingVlmChoice();
+    if (!rec.has_value()) {
+      return;
+    }
+    explorer_msgs::msg::VlmChoiceEvent msg;
+    msg.header.stamp = now();
+    msg.header.frame_id = map_frame_;
+    msg.brain_id = brain_->id();
+    msg.prompt = rec->prompt;
+    msg.response = rec->response;
+    msg.selected_frontier_id = rec->selected_frontier_id;
+    msg.candidate_ids = rec->candidate_ids;
+    vlm_choice_pub_->publish(msg);
+  }
+
+  void publishPendingBrainTelemetry()
+  {
+    publishPendingGraphEdges();
+    publishPendingVlmChoice();
+  }
+
+  void publishBrainDecision(const explorer_mission::BrainDecision & decision)
+  {
+    if (!brain_decision_pub_ || !brain_) {
+      return;
+    }
+    explorer_msgs::msg::BrainDecisionEvent msg;
+    msg.header.stamp = now();
+    msg.header.frame_id = map_frame_;
+    msg.brain_id = brain_->id();
+    switch (decision.action) {
+      case explorer_mission::BrainAction::kNavigateTo:
+        msg.action = "navigate";
+        break;
+      case explorer_mission::BrainAction::kWait:
+        msg.action = "wait";
+        break;
+      case explorer_mission::BrainAction::kComplete:
+      default:
+        msg.action = "complete";
+        break;
+    }
+    msg.goal_id = decision.goal_id;
+    msg.goal_x = decision.goal.x;
+    msg.goal_y = decision.goal.y;
+    msg.detail = decision.detail;
+    msg.visited_ids = brain_->visitedIds();
+    msg.live_ids = brain_->liveFrontierIds();
+    brain_decision_pub_->publish(msg);
   }
 
   void publishPhase(
@@ -396,7 +504,7 @@ private:
     }
   }
 
-  bool detectAndRateChildren()
+  bool detectAndOfferToBrain()
   {
     nav_msgs::msg::OccupancyGrid grid;
     {
@@ -408,11 +516,14 @@ private:
       grid = latest_grid_;
     }
 
-    publishPhase(
-      "detecting", tree_.currentNodeId(), 0, false,
-      "on-demand frontier detection");
+    publishPhase("detecting", statusNodeId(), 0, false, "on-demand frontier detection");
 
-    const auto exclusion_centers = tree_.allNodePositions();
+    std::vector<cv::Point2f> exclusion_centers;
+    if (brain_->usesFrontierTree() && brain_->frontierTree()) {
+      exclusion_centers = brain_->frontierTree()->allNodePositions();
+    } else {
+      exclusion_centers = greedy_visited_poses_;
+    }
     const cv::Mat mask = explorer_mission::buildExclusionMask(
       grid, exclusion_centers, frontier_exclusion_radius_);
     auto contours = explorer_mission::findFrontierContoursMasked(
@@ -428,75 +539,72 @@ private:
       contours.size(), before_dedupe, contours.size(),
       frontier_detection_radius_, frontier_exclusion_radius_);
 
-    last_new_child_ids_.clear();
-    // Parent pool = nodes from previous batches only (not siblings added this round).
-    const std::vector<uint32_t> parent_pool = tree_.allNodeIds();
-    std::vector<uint32_t> new_child_ids;
-    for (const auto & contour : contours) {
-      const cv::Point2f midpoint = explorer_mission::frontierMidpointWorld(contour, grid);
-      const uint32_t parent_id = tree_.resolveFrontierParentId(
-        parent_to_nearest_node_, tree_.currentNodeId(), midpoint, &parent_pool);
-      const uint32_t child_id = tree_.addChild(
-        parent_id, midpoint, explorer_mission::kOpennessNotRated, false);
-      if (child_id != std::numeric_limits<uint32_t>::max()) {
-        new_child_ids.push_back(child_id);
-      }
+    std::vector<explorer_mission::FrontierCandidate> candidates;
+    candidates.reserve(contours.size());
+    uint32_t greedy_id_base = greedy_detect_key_ + 1;
+    for (size_t i = 0; i < contours.size(); ++i) {
+      const cv::Point2f midpoint =
+        explorer_mission::frontierMidpointWorld(contours[i], grid);
+      explorer_mission::FrontierCandidate c;
+      // Tree brain ignores id; greedy needs stable ids within this detect batch.
+      c.id = brain_->usesFrontierTree() ? 0u : (greedy_id_base + static_cast<uint32_t>(i));
+      c.position = midpoint;
+      candidates.push_back(c);
     }
-    last_new_child_ids_ = new_child_ids;
-    publishTree();
 
-    if (new_child_ids.empty()) {
-      publishPhase(
-        "selecting", tree_.currentNodeId(), 0, false,
-        "no new frontiers detected");
+    const std::vector<uint32_t> new_ids = brain_->onFrontiersDetected(candidates);
+    publishTree();
+    publishPendingGraphEdges();
+
+    if (new_ids.empty()) {
+      publishPhase("selecting", statusNodeId(), 0, false, "no new frontiers detected");
+      return true;
+    }
+
+    if (!brain_->wantsVlmScores()) {
+      publishPhase("selecting", statusNodeId(), 0, false, "brain skips VLM");
       return true;
     }
 
     if (cached_images_.empty()) {
-      RCLCPP_WARN(get_logger(), "No cached scan images; marking new children blocked.");
-      for (uint32_t id : new_child_ids) {
-        tree_.setOpennessScore(id, 0);
+      RCLCPP_WARN(get_logger(), "No cached scan images; soft-failing new frontiers to score=0");
+      std::unordered_map<uint32_t, uint8_t> zeros;
+      for (uint32_t id : new_ids) {
+        zeros[id] = 0;
       }
+      brain_->onVlmScores(zeros);
       publishTree();
       return true;
     }
 
-    auto views = buildFrontierViews(new_child_ids);
+    auto views = buildFrontierViews(new_ids);
     if (views.frontier_ids.empty()) {
-      RCLCPP_WARN(get_logger(), "Failed to match images to frontiers.");
-      for (uint32_t id : new_child_ids) {
-        tree_.setOpennessScore(id, 0);
+      RCLCPP_WARN(get_logger(), "Failed to match images to frontiers; soft-fail score=0");
+      std::unordered_map<uint32_t, uint8_t> zeros;
+      for (uint32_t id : new_ids) {
+        zeros[id] = 0;
       }
+      brain_->onVlmScores(zeros);
       publishTree();
       return true;
     }
 
     publishPhase(
-      "awaiting_vlm", tree_.currentNodeId(), 0, false,
+      "awaiting_vlm", statusNodeId(), 0, false,
       "rating " + std::to_string(views.frontier_ids.size()) + " frontiers");
     if (!waitForVlmScores(views.frontier_ids)) {
-      // Soft-fail unrated children to score 1 (not 0). Score 0 marks
-      // fully_explored and permanently drops the frontier — that was turning
-      // Ollama timeouts into a dead tree.
       RCLCPP_WARN(
         get_logger(),
         "VLM scores timeout; soft-failing still-unrated children to score=1");
-      applyLatestScores();
-      for (uint32_t id : views.frontier_ids) {
-        const auto * node = tree_.find(id);
-        if (node && node->openness_score == explorer_mission::kOpennessNotRated) {
-          tree_.setOpennessScore(id, 1);
-        }
-      }
+      applyLatestScoresToBrain();
+      brain_->softFailUnrated(1);
       publishTree();
       return true;
     }
 
-    applyLatestScores();
+    applyLatestScoresToBrain();
     publishTree();
-    publishPhase(
-      "selecting", tree_.currentNodeId(), 0, false,
-      "VLM scores applied");
+    publishPhase("selecting", statusNodeId(), 0, false, "VLM scores applied");
     return true;
   }
 
@@ -511,9 +619,14 @@ private:
       return msg;
     }
 
+    const explorer_mission::FrontierTree * tree = brain_->frontierTree();
+    if (!tree) {
+      return msg;
+    }
+
     updateRobotPoseFromTf();
     for (uint32_t child_id : child_ids) {
-      const explorer_mission::TreeNode * node = tree_.find(child_id);
+      const explorer_mission::TreeNode * node = tree->find(child_id);
       if (!node) {
         continue;
       }
@@ -585,27 +698,33 @@ private:
           get_logger(),
           "Early nav: at least one frontier scored >= %d (%zu/%zu rated)",
           early_nav_min_score_, rated, expected.size());
-        for (const auto & entry : accumulated_scores_) {
-          tree_.setOpennessScore(entry.first, entry.second);
-        }
+        applyLatestScoresToBrainLocked();
         return true;
       }
       if (rated == expected.size() && !expected.empty()) {
-        for (const auto & entry : accumulated_scores_) {
-          tree_.setOpennessScore(entry.first, entry.second);
-        }
+        applyLatestScoresToBrainLocked();
         return true;
       }
     }
     return false;
   }
 
-  void applyLatestScores()
+  void applyLatestScoresToBrain()
   {
     std::lock_guard<std::mutex> lock(scores_mutex_);
-    for (const auto & entry : accumulated_scores_) {
-      tree_.setOpennessScore(entry.first, entry.second);
+    applyLatestScoresToBrainLocked();
+  }
+
+  void applyLatestScoresToBrainLocked()
+  {
+    if (!brain_ || accumulated_scores_.empty()) {
+      return;
     }
+    std::unordered_map<uint32_t, uint8_t> batch;
+    for (const auto & entry : accumulated_scores_) {
+      batch[entry.first] = entry.second;
+    }
+    brain_->onVlmScores(batch);
   }
 
   static double angularDifference(double angle1, double angle2)
@@ -646,19 +765,13 @@ private:
     }
   }
 
-  void performScanIfNeeded()
+  void performScanIfNeeded(bool force = false)
   {
     rclcpp::sleep_for(std::chrono::milliseconds(100));
 
-    bool should_scan = false;
-    if (counter_ == 0) {
-      should_scan = true;
-    } else if (last_scan_position_.x != -1000.0f && last_scan_position_.y != -1000.0f) {
-      const double dist = explorer_mission::euclideanDist(last_scan_position_, current_pos_);
-      should_scan = dist > 0.5;
-    }
-
+    bool should_scan = force;
     if (!should_scan) {
+      // Legacy distance heuristic removed: callers pass force on unvisited arrivals.
       return;
     }
 
@@ -668,8 +781,8 @@ private:
 
     const char * scan_why = (counter_ == 0)
       ? "rotate_360 first scan"
-      : "rotate_360 (moved >0.5 m)";
-    publishPhase("scanning", tree_.currentNodeId(), 0, false, scan_why);
+      : "rotate_360 (unvisited frontier)";
+    publishPhase("scanning", statusNodeId(), 0, false, scan_why);
 
     auto goal = Rotate360::Goal();
     auto future = rotate_client_->async_send_goal(goal);
@@ -702,43 +815,38 @@ private:
     }
     last_scan_position_ = current_pos_;
     ++counter_;
-    publishPhase("scanning", tree_.currentNodeId(), 0, false, "rotate_360 done");
+    publishPhase("scanning", statusNodeId(), 0, false, "rotate_360 done");
   }
 
-  bool returnToScanNodeWithRetry(const explorer_mission::TreeNode * scan_node)
+  bool returnToScanPoseWithRetry(uint32_t scan_id, const cv::Point2f & scan_pose)
   {
-    if (!scan_node) {
-      return false;
-    }
-
     updateRobotPoseFromTf();
     const double dist_m = std::hypot(
-      static_cast<double>(current_pos_.x - scan_node->position.x),
-      static_cast<double>(current_pos_.y - scan_node->position.y));
+      static_cast<double>(current_pos_.x - scan_pose.x),
+      static_cast<double>(current_pos_.y - scan_pose.y));
     if (goal_accept_radius_m_ > 0.0 && dist_m <= goal_accept_radius_m_) {
       RCLCPP_INFO(
         get_logger(),
         "Already within %.2f m of scan node %u (dist=%.3f); skip return-home nav",
-        goal_accept_radius_m_, scan_node->id, dist_m);
+        goal_accept_radius_m_, scan_id, dist_m);
       return_home_guard_.onReturnHomeSucceeded();
       return true;
     }
 
     publishPhase(
-      "backtracking", tree_.currentNodeId(), scan_node->id, false,
+      "backtracking", statusNodeId(), scan_id, false,
       "nav/plan failed — return to scan node before next frontier");
 
     for (int attempt = 1; attempt <= return_home_max_attempts_; ++attempt) {
-      if (navigateWithUnstickRecovery(scan_node->position, scan_node->position).ok) {
+      if (navigateWithUnstickRecovery(scan_pose, scan_pose).ok) {
         return_home_guard_.onReturnHomeSucceeded();
         return true;
       }
 
-      // Re-check proximity: unstick may have left us close enough.
       updateRobotPoseFromTf();
       const double d = std::hypot(
-        static_cast<double>(current_pos_.x - scan_node->position.x),
-        static_cast<double>(current_pos_.y - scan_node->position.y));
+        static_cast<double>(current_pos_.x - scan_pose.x),
+        static_cast<double>(current_pos_.y - scan_pose.y));
       if (goal_accept_radius_m_ > 0.0 && d <= goal_accept_radius_m_) {
         return_home_guard_.onReturnHomeSucceeded();
         return true;
@@ -747,16 +855,14 @@ private:
       RCLCPP_WARN(
         get_logger(),
         "Return to scan node %u failed (attempt %d/%d); retrying.",
-        scan_node->id, attempt, return_home_max_attempts_);
+        scan_id, attempt, return_home_max_attempts_);
       rclcpp::sleep_for(std::chrono::seconds(1));
     }
 
-    // Critical: do not leave awaiting_return_ stuck true — that loops forever
-    // selecting nothing except failed return-home (cur==tgt thrash).
     RCLCPP_ERROR(
       get_logger(),
       "Return to scan node %u abandoned after %d attempts; clearing return-home guard",
-      scan_node->id, return_home_max_attempts_);
+      scan_id, return_home_max_attempts_);
     return_home_guard_.onReturnHomeAbandoned();
     return false;
   }
@@ -834,6 +940,52 @@ private:
     }
   }
 
+  bool setRemoteDoubleParam(
+    const std::string & remote_node,
+    const std::string & param_name,
+    double value)
+  {
+    auto client = std::make_shared<rclcpp::AsyncParametersClient>(this, remote_node);
+    if (!client->wait_for_service(std::chrono::seconds(2))) {
+      RCLCPP_WARN(
+        get_logger(), "Param service unavailable for %s (skip %s=%.3f)",
+        remote_node.c_str(), param_name.c_str(), value);
+      return false;
+    }
+    auto future = client->set_parameters({rclcpp::Parameter(param_name, value)});
+    if (future.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+      RCLCPP_WARN(
+        get_logger(), "Timed out setting %s on %s",
+        param_name.c_str(), remote_node.c_str());
+      return false;
+    }
+    const auto results = future.get();
+    for (const auto & r : results) {
+      if (!r.successful) {
+        RCLCPP_WARN(
+          get_logger(), "Failed setting %s on %s: %s",
+          param_name.c_str(), remote_node.c_str(), r.reason.c_str());
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void applyCostmapInflation(double nav2_radius_m, double mapper_inflation_m)
+  {
+    setRemoteDoubleParam(
+      "/global_costmap/global_costmap",
+      "inflation_layer.inflation_radius", nav2_radius_m);
+    setRemoteDoubleParam(
+      "/local_costmap/local_costmap",
+      "inflation_layer.inflation_radius", nav2_radius_m);
+    // One of these mappers is active depending on launch; both are best-effort.
+    setRemoteDoubleParam("known_pose_pc_mapper", "obstacle_inflation_m", mapper_inflation_m);
+    setRemoteDoubleParam("known_pose_mapper", "obstacle_inflation_m", mapper_inflation_m);
+    // Allow a costmap / grid republish before the next NavigateToPose.
+    rclcpp::sleep_for(std::chrono::milliseconds(500));
+  }
+
   NavAttemptResult navigateWithUnstickRecovery(
     const cv::Point2f & goal_pos, const cv::Point2f & look_at)
   {
@@ -842,31 +994,50 @@ private:
     }
 
     int unstick_attempts = 0;
+    bool zero_inflation_done = false;
     while (true) {
       const uint16_t code = lastNavErrorCode();
       const double clearance = currentClearanceM();
       auto decision = explorer_mission::decideNavFailureRecovery(
-        code, clearance, unstick_min_clearance_m_, unstick_attempts, unstick_max_attempts_);
+        code, clearance, unstick_min_clearance_m_, unstick_attempts, unstick_max_attempts_,
+        zero_inflation_done);
       RCLCPP_WARN(
         get_logger(),
-        "Nav failed (error_code=%u clearance=%.3f attempts=%d/%d): unstick=%d mark=%d — %s",
+        "Nav failed (error_code=%u clearance=%.3f attempts=%d/%d): "
+        "unstick=%d zero_infl=%d mark=%d — %s",
         static_cast<unsigned>(code), clearance,
         unstick_attempts, unstick_max_attempts_,
         static_cast<int>(decision.attempt_unstick),
+        static_cast<int>(decision.attempt_zero_inflation),
         static_cast<int>(decision.mark_frontier_dead),
         navigation_mode_ == "nav2" && nav2_navigator_ ?
         nav2_navigator_->lastError().c_str() : "n/a");
 
-      if (!decision.attempt_unstick) {
-        return NavAttemptResult{false, decision.mark_frontier_dead};
+      if (decision.attempt_unstick) {
+        runWallUnstick(unstick_attempts);
+        ++unstick_attempts;
+        if (navigateToPosition(goal_pos, look_at)) {
+          return NavAttemptResult{true, false};
+        }
+        continue;
       }
 
-      runWallUnstick(unstick_attempts);
-      ++unstick_attempts;
-
-      if (navigateToPosition(goal_pos, look_at)) {
-        return NavAttemptResult{true, false};
+      if (decision.attempt_zero_inflation) {
+        RCLCPP_WARN(
+          get_logger(),
+          "Last-ditch recovery: NavigateToPose with zero inflation "
+          "(nav2 radius=0, mapper inflate=0)");
+        applyCostmapInflation(0.0, 0.0);
+        const bool ok = navigateToPosition(goal_pos, look_at);
+        applyCostmapInflation(nav2_inflation_radius_m_, mapper_inflation_m_);
+        zero_inflation_done = true;
+        if (ok) {
+          return NavAttemptResult{true, false};
+        }
+        continue;
       }
+
+      return NavAttemptResult{false, decision.mark_frontier_dead};
     }
   }
 
@@ -964,6 +1135,7 @@ private:
   int min_contour_pixels_{15};
   double vlm_scores_timeout_s_{120.0};
   bool publish_debug_topics_{false};
+  std::string brain_id_{"vlm_tree_dfs"};
   bool dfs_prefer_highest_openness_{true};
   double goal_accept_radius_m_{1.0};
   bool parent_to_nearest_node_{true};
@@ -972,14 +1144,19 @@ private:
   double unstick_min_clearance_m_{0.25};
   int unstick_max_steps_{8};
   int unstick_max_attempts_{explorer_mission::kDefaultMaxUnstickAttempts};
+  /// Nominal inflation restored after last-ditch zero-inflation retry.
+  double nav2_inflation_radius_m_{0.15};
+  double mapper_inflation_m_{0.05};
 
   explorer_mission::ReturnHomeGuard return_home_guard_;
 
   std::unique_ptr<explorer_mission::Nav2Navigator> nav2_navigator_;
-  explorer_mission::FrontierTree tree_;
+  std::unique_ptr<explorer_mission::ExplorationBrain> brain_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
-  std::unordered_set<uint32_t> scanned_node_ids_;
-  std::vector<uint32_t> last_new_child_ids_;
+  std::unordered_set<uint32_t> scanned_detect_keys_;
+  std::map<uint32_t, cv::Point2f> scan_poses_;
+  std::vector<cv::Point2f> greedy_visited_poses_;
+  uint32_t greedy_detect_key_{0};
   std::map<uint32_t, uint8_t> accumulated_scores_;
   std::map<uint32_t, std::string> accumulated_reasonings_;
 
@@ -1002,6 +1179,9 @@ private:
 
   rclcpp::Publisher<explorer_msgs::msg::FrontierTree>::SharedPtr tree_pub_;
   rclcpp::Publisher<explorer_msgs::msg::ExplorationStatus>::SharedPtr status_pub_;
+  rclcpp::Publisher<explorer_msgs::msg::BrainDecisionEvent>::SharedPtr brain_decision_pub_;
+  rclcpp::Publisher<explorer_msgs::msg::BrainGraphEdges>::SharedPtr brain_graph_edges_pub_;
+  rclcpp::Publisher<explorer_msgs::msg::VlmChoiceEvent>::SharedPtr vlm_choice_pub_;
   rclcpp::Publisher<explorer_msgs::msg::FrontierViews>::SharedPtr vlm_views_pub_;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr debug_events_pub_;
   rclcpp::Publisher<explorer_msgs::msg::FrontierViews>::SharedPtr debug_vlm_batch_pub_;

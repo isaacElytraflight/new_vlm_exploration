@@ -69,6 +69,7 @@ class KnownPoseMapperNode(Node):
         self._max_skew_ns = int(skew_sec * 1_000_000_000)
         pending_limit = max(1, int(self.get_parameter("pending_scan_limit").value))
         inflation_m = max(0.0, float(self.get_parameter("obstacle_inflation_m").value))
+        self._resolution = resolution
         self._inflate_cells = inflation_radius_cells(resolution, inflation_m)
 
         self._grid = OccupancyMap(resolution=resolution, initial_size_m=initial_size)
@@ -88,10 +89,23 @@ class KnownPoseMapperNode(Node):
         self.create_subscription(Odometry, odom_topic, self._odom_cb, 50)
         self.create_subscription(LaserScan, scan_topic, self._scan_cb, qos_profile_sensor_data)
         self.create_timer(1.0 / publish_hz, self._publish)
+        self.add_on_set_parameters_callback(self._on_set_params)
         self.get_logger().info(
             f"Known-pose mapper: {scan_topic} + {odom_topic} (exact stamp) → {grid_topic} "
             f"(obstacle_inflation={inflation_m:.2f}m / {self._inflate_cells} cells)"
         )
+
+    def _on_set_params(self, params):
+        from rcl_interfaces.msg import SetParametersResult
+
+        for p in params:
+            if p.name == "obstacle_inflation_m":
+                m = max(0.0, float(p.value))
+                self._inflate_cells = inflation_radius_cells(self._resolution, m)
+                self.get_logger().warn(
+                    f"obstacle_inflation_m set to {m:.3f} ({self._inflate_cells} cells)"
+                )
+        return SetParametersResult(successful=True)
 
     def _odom_cb(self, msg: Odometry) -> None:
         stamp_ns = stamp_msg_to_ns(msg.header.stamp)

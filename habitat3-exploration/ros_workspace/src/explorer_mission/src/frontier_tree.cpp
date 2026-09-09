@@ -16,6 +16,7 @@ uint32_t FrontierTree::createRoot(const cv::Point2f & position)
   root.position = position;
   root.parent_id = -1;
   root.openness_score = kOpennessNotRated;
+  root.visited = false;
   root.fully_explored = false;
   nodes_.push_back(root);
   root_id_ = 0;
@@ -37,6 +38,7 @@ uint32_t FrontierTree::addChild(
   child.position = position;
   child.parent_id = static_cast<int32_t>(parent_id);
   child.openness_score = openness_score;
+  child.visited = false;
   child.fully_explored = fully_explored;
   nodes_.push_back(child);
 
@@ -58,12 +60,32 @@ void FrontierTree::setOpennessScore(uint32_t id, uint8_t score)
   }
 }
 
+void FrontierTree::markVisited(uint32_t id)
+{
+  TreeNode * node = find(id);
+  if (node) {
+    node->visited = true;
+  }
+}
+
 void FrontierTree::markFullyExplored(uint32_t id)
 {
   TreeNode * node = find(id);
   if (node) {
     node->fully_explored = true;
   }
+}
+
+bool FrontierTree::isVisited(uint32_t id) const
+{
+  const TreeNode * node = find(id);
+  return node != nullptr && node->visited;
+}
+
+bool FrontierTree::isDead(uint32_t id) const
+{
+  const TreeNode * node = find(id);
+  return node != nullptr && node->fully_explored;
 }
 
 bool FrontierTree::hasUnexploredChildren(uint32_t id) const

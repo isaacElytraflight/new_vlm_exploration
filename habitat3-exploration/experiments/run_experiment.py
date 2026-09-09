@@ -12,7 +12,11 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from experiments.config import ExperimentConfig  # noqa: E402
+from experiments.config import (  # noqa: E402
+    ExperimentConfig,
+    filter_algorithms,
+    make_ablation_experiment_id,
+)
 from experiments.orchestrator import ExperimentOrchestrator  # noqa: E402
 
 
@@ -58,24 +62,34 @@ def main(argv: list[str] | None = None) -> int:
         "--experiment-id",
         type=str,
         default=None,
-        help="Override experiment_id from the YAML (used for fresh campaign isolation)",
+        help="Campaign folder id (prefer ablation_run_<timestamp>)",
     )
     parser.add_argument(
         "--experiment-id-suffix",
         type=str,
         default=None,
-        help="Append to YAML experiment_id (e.g. _20260907_153045 for a fresh campaign)",
+        help="Deprecated: becomes experiment_id ablation_run_<suffix>",
+    )
+    parser.add_argument(
+        "--algorithms",
+        type=str,
+        default=None,
+        help="Comma-separated algorithm ids to run (subset of YAML algorithms[])",
     )
     args = parser.parse_args(argv)
 
     config = ExperimentConfig.from_yaml(args.config)
     if args.experiment_id:
-        config.experiment_id = str(args.experiment_id).strip()
+        config.experiment_id = make_ablation_experiment_id(str(args.experiment_id).strip())
     elif args.experiment_id_suffix:
-        suffix = str(args.experiment_id_suffix).strip()
-        if suffix and not suffix.startswith("_"):
-            suffix = "_" + suffix
-        config.experiment_id = f"{config.experiment_id}{suffix}"
+        config.experiment_id = make_ablation_experiment_id(str(args.experiment_id_suffix).strip())
+    elif args.fresh:
+        # Fresh without an explicit id → new ablation_run_<timestamp> folder.
+        config.experiment_id = make_ablation_experiment_id()
+
+    if args.algorithms is not None:
+        selected = [p.strip() for p in str(args.algorithms).split(",") if p.strip()]
+        config.algorithms = filter_algorithms(config.algorithms, selected)
 
     orch = ExperimentOrchestrator(
         config,

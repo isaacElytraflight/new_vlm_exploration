@@ -20,7 +20,7 @@ from experiments.config import (
 from experiments.db import ExperimentDB, utc_now_iso
 from experiments.media_cleanup import cleanup_run_media
 from experiments.metrics import compute_revisit_bins, coverage_ratio
-from experiments.package import write_run_package
+from experiments.package import write_run_package, write_run_info
 from experiments.progress import ProgressWriter
 from experiments.state import ExperimentState, config_fingerprint
 
@@ -150,6 +150,27 @@ class ExperimentOrchestrator:
             remaining=len(pending),
             current_index=completed_prior,
             resumed=resumed,
+        )
+
+        write_run_info(
+            self._exp_dir / "campaign_info.json",
+            {
+                "schema_version": 1,
+                "experiment_id": self.config.experiment_id,
+                "algorithms": list(self.config.algorithms),
+                "scenes": list(self.config.scenes),
+                "seeds": dict(self.config.seeds),
+                "n_runs_per_cell": self.config.n_runs_per_cell,
+                "timeout_s": self.config.timeout_s,
+                "eval": {
+                    "fov_deg": self.config.eval.fov_deg,
+                    "reveal_radius_m": self.config.eval.reveal_radius_m,
+                },
+                "container_name": self.config.container_name,
+                "total_runs": total,
+                "fresh": self.fresh,
+                "resume": self.resume,
+            },
         )
 
         results: List[OrchestratorResult] = []
@@ -325,7 +346,7 @@ class ExperimentOrchestrator:
                 total=total,
                 spec=spec,
                 step="apply_profile",
-                detail=spec.profile.id,
+                detail=f"{spec.profile.id} brain={spec.profile.brain_id}",
                 resumed=resumed,
                 completed_prior=completed_prior,
             )
@@ -424,6 +445,15 @@ class ExperimentOrchestrator:
             trajectory=trajectory,
             summary=summary,
             revisit_bins=revisit,
+            brain_id=spec.profile.brain_id,
+            scene_path=spec.scene_path,
+            environment={
+                "container_name": self.config.container_name,
+                "project_root": str(self.project_root),
+                "artifact_root": str(spec.artifact_root),
+                "navigation_stack": "nav2",
+                "sim": "habitat3",
+            },
         )
 
         self.db.finalize_run(
@@ -570,9 +600,11 @@ class ExperimentOrchestrator:
     def _prepare_scene(self, spec: RunSpec) -> None:
         scene_path = spec.scene_path
         run_dir = self._container_run_dir(spec)
+        brain_id = spec.profile.brain_id
         self._docker(
             f"mkdir -p {shlex.quote(run_dir)} && "
-            f"printf %s {shlex.quote(scene_path)} > /data/selected_scene.path"
+            f"printf %s {shlex.quote(scene_path)} > /data/selected_scene.path && "
+            f"printf %s {shlex.quote(brain_id)} > /data/selected_brain.id"
         )
         env_file = f"{run_dir}/.env"
         self._docker(
@@ -580,6 +612,7 @@ class ExperimentOrchestrator:
                 f"printf '%s\\n' "
                 f"{shlex.quote(f'HABITAT_SPAWN_SEED={int(spec.seed)}')} "
                 f"{shlex.quote(f'HABITAT_SENSOR_RANGE_M={float(spec.eval_config.reveal_radius_m)}')} "
+                f"{shlex.quote(f'EXPLORER_BRAIN_ID={brain_id}')} "
                 f"> {shlex.quote(env_file)}"
             )
         )

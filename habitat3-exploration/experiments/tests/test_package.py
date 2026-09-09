@@ -70,9 +70,9 @@ def test_write_run_package_manifest_positive(tmp_path: Path):
     run_dir = tmp_path / "run0"
     manifest = write_run_package(
         run_dir,
-        run_id="exp__algo__scene__seed0",
-        experiment_id="exp",
-        algorithm_id="algo",
+        run_id="greedy_nearest_seed0",
+        experiment_id="ablation_run_20260908_120000",
+        algorithm_id="greedy_nearest",
         scene_id="scene",
         seed=0,
         status="completed",
@@ -82,15 +82,49 @@ def test_write_run_package_manifest_positive(tmp_path: Path):
         trajectory=[[0.0, 0.0, 0.0], [1.0, 0.0, 1.0]],
         summary={"final_coverage": 0.2, "distance_m": 3.0},
         revisit_bins={1: 10, 2: 1},
+        brain_id="greedy_nearest",
+        scene_path="/data/scene.glb",
+        environment={"sim": "habitat3"},
     )
     assert (run_dir / "manifest.json").is_file()
+    assert (run_dir / "run_info.json").is_file()
     assert (run_dir / "metrics" / "coverage_vs_distance.csv").is_file()
     assert (run_dir / "metrics" / "trajectory.csv").is_file()
     assert (run_dir / "metrics" / "summary.json").is_file()
     data = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     assert data["schema_version"] == 1
     assert data["paths"]["coverage_vs_distance"].endswith(".csv")
+    assert data["paths"]["run_info"] == "run_info.json"
+    info = json.loads((run_dir / "run_info.json").read_text(encoding="utf-8"))
+    assert info["scene_id"] == "scene"
+    assert info["scene_path"] == "/data/scene.glb"
+    assert info["environment"]["sim"] == "habitat3"
     sizes = package_byte_sizes(run_dir, data["paths"])
     assert manifest["total_bytes"] == sum(sizes.values())
     assert sizes["coverage_vs_distance"] > 0
     assert sizes["summary"] > 0
+    assert sizes["run_info"] > 0
+
+
+def test_run_info_required_fields_negative(tmp_path: Path):
+    """run_info must carry scene/env even when folder name is short."""
+    run_dir = tmp_path / "greedy_nearest_seed0"
+    write_run_package(
+        run_dir,
+        run_id="greedy_nearest_seed0",
+        experiment_id="ablation_run_x",
+        algorithm_id="greedy_nearest",
+        scene_id="JmbYfDe2QKZ",
+        seed=0,
+        status="completed",
+        eval_fov_deg=360.0,
+        eval_reveal_radius_m=5.0,
+        coverage_samples=[],
+        trajectory=[],
+        summary={},
+        revisit_bins={},
+    )
+    info = json.loads((run_dir / "run_info.json").read_text(encoding="utf-8"))
+    assert "JmbYfDe2QKZ" in info["scene_id"]
+    assert info["run_id"] == "greedy_nearest_seed0"
+    assert "experiment_id" in info

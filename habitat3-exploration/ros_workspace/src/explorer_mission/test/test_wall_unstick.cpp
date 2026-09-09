@@ -43,6 +43,7 @@ TEST(DecideNavFailure, StartOccupiedRequestsUnstickNoMark_Positive)
   const auto d = explorer_mission::decideNavFailureRecovery(
     explorer_mission::kNavErrorStartOccupied, 1.0, 0.25, /*unstick_attempts=*/0, /*max=*/5);
   EXPECT_TRUE(d.attempt_unstick);
+  EXPECT_FALSE(d.attempt_zero_inflation);
   EXPECT_FALSE(d.mark_frontier_dead);
 }
 
@@ -51,6 +52,7 @@ TEST(DecideNavFailure, LowClearanceRequestsUnstickEvenWithoutCode_Positive)
   const auto d = explorer_mission::decideNavFailureRecovery(
     explorer_mission::kNavErrorNone, 0.10, 0.25, /*unstick_attempts=*/0, /*max=*/5);
   EXPECT_TRUE(d.attempt_unstick);
+  EXPECT_FALSE(d.attempt_zero_inflation);
   EXPECT_FALSE(d.mark_frontier_dead);
 }
 
@@ -59,6 +61,7 @@ TEST(DecideNavFailure, GoalOccupiedMarksWithoutUnstick_Positive)
   const auto d = explorer_mission::decideNavFailureRecovery(
     explorer_mission::kNavErrorGoalOccupied, 1.0, 0.25, /*unstick_attempts=*/0, /*max=*/5);
   EXPECT_FALSE(d.attempt_unstick);
+  EXPECT_FALSE(d.attempt_zero_inflation);
   EXPECT_TRUE(d.mark_frontier_dead);
 }
 
@@ -68,14 +71,27 @@ TEST(DecideNavFailure, NoPathWithGoodClearanceRequestsReverseUnstick_Positive)
   const auto d = explorer_mission::decideNavFailureRecovery(
     explorer_mission::kNavErrorNoValidPath, 1.0, 0.25, /*unstick_attempts=*/0, /*max=*/5);
   EXPECT_TRUE(d.attempt_unstick);
+  EXPECT_FALSE(d.attempt_zero_inflation);
   EXPECT_FALSE(d.mark_frontier_dead);
 }
 
-TEST(DecideNavFailure, NoPathAfterBudgetExhaustedMarks_Positive)
+TEST(DecideNavFailure, NoPathAfterBudgetExhaustedRequestsZeroInflation_Positive)
 {
   const auto d = explorer_mission::decideNavFailureRecovery(
-    explorer_mission::kNavErrorNoValidPath, 0.10, 0.25, /*unstick_attempts=*/5, /*max=*/5);
+    explorer_mission::kNavErrorNoValidPath, 0.10, 0.25, /*unstick_attempts=*/5, /*max=*/5,
+    /*zero_inflation_done=*/false);
   EXPECT_FALSE(d.attempt_unstick);
+  EXPECT_TRUE(d.attempt_zero_inflation);
+  EXPECT_FALSE(d.mark_frontier_dead);
+}
+
+TEST(DecideNavFailure, NoPathAfterZeroInflationFailsMarks_Positive)
+{
+  const auto d = explorer_mission::decideNavFailureRecovery(
+    explorer_mission::kNavErrorNoValidPath, 0.10, 0.25, /*unstick_attempts=*/5, /*max=*/5,
+    /*zero_inflation_done=*/true);
+  EXPECT_FALSE(d.attempt_unstick);
+  EXPECT_FALSE(d.attempt_zero_inflation);
   EXPECT_TRUE(d.mark_frontier_dead);
 }
 
@@ -85,15 +101,18 @@ TEST(DecideNavFailure, StartBadAllowsRetryWithinBudget_Positive)
   const auto d = explorer_mission::decideNavFailureRecovery(
     explorer_mission::kNavErrorStartOccupied, 0.05, 0.25, /*unstick_attempts=*/1, /*max=*/5);
   EXPECT_TRUE(d.attempt_unstick);
+  EXPECT_FALSE(d.attempt_zero_inflation);
   EXPECT_FALSE(d.mark_frontier_dead);
 }
 
-TEST(DecideNavFailure, StartBadExhaustsBudgetThenMarks_Positive)
+TEST(DecideNavFailure, StartBadExhaustsBudgetThenZeroInflation_Positive)
 {
   const auto d = explorer_mission::decideNavFailureRecovery(
-    explorer_mission::kNavErrorStartOccupied, 0.05, 0.25, /*unstick_attempts=*/5, /*max=*/5);
+    explorer_mission::kNavErrorStartOccupied, 0.05, 0.25, /*unstick_attempts=*/5, /*max=*/5,
+    /*zero_inflation_done=*/false);
   EXPECT_FALSE(d.attempt_unstick);
-  EXPECT_TRUE(d.mark_frontier_dead);
+  EXPECT_TRUE(d.attempt_zero_inflation);
+  EXPECT_FALSE(d.mark_frontier_dead);
 }
 
 TEST(DecideNavFailure, StartBadFourthRetryStillAllowed_Positive)
@@ -110,6 +129,18 @@ TEST(DecideNavFailure, AdequateClearanceNoSpecialCodeMarks_Negative)
   const auto d = explorer_mission::decideNavFailureRecovery(
     explorer_mission::kNavErrorNone, 0.50, 0.25, /*unstick_attempts=*/0, /*max=*/5);
   EXPECT_FALSE(d.attempt_unstick);
+  EXPECT_FALSE(d.attempt_zero_inflation);
+  EXPECT_TRUE(d.mark_frontier_dead);
+}
+
+TEST(DecideNavFailure, ZeroInflationSkippedWhenGoalOccupied_Negative)
+{
+  // Goal occupied is not a thrash/deflate case — mark immediately.
+  const auto d = explorer_mission::decideNavFailureRecovery(
+    explorer_mission::kNavErrorGoalOccupied, 1.0, 0.25, /*unstick_attempts=*/5, /*max=*/5,
+    /*zero_inflation_done=*/false);
+  EXPECT_FALSE(d.attempt_unstick);
+  EXPECT_FALSE(d.attempt_zero_inflation);
   EXPECT_TRUE(d.mark_frontier_dead);
 }
 

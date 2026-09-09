@@ -22,6 +22,9 @@ struct TreeNode
   int32_t parent_id{-1};
   std::vector<uint32_t> children_ids;
   uint8_t openness_score{kOpennessNotRated};
+  /// Physically arrived (and eligible for a one-time 360° scan). Distinct from dead.
+  bool visited{false};
+  /// Permanently abandoned / fully expanded — not a live frontier target.
   bool fully_explored{false};
 };
 
@@ -35,7 +38,10 @@ public:
     uint8_t openness_score,
     bool fully_explored);
   void setOpennessScore(uint32_t id, uint8_t score);
+  void markVisited(uint32_t id);
   void markFullyExplored(uint32_t id);
+  bool isVisited(uint32_t id) const;
+  bool isDead(uint32_t id) const;
   bool hasUnexploredChildren(uint32_t id) const;
   bool hasUnexploredNodesExcluding(uint32_t id_a, uint32_t id_b) const;
   std::optional<uint32_t> selectNextChild(

@@ -78,6 +78,47 @@ def write_revisit_bins_json(path: Path, bins: Mapping[int, int]) -> None:
     atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
+def build_run_info(
+    *,
+    run_id: str,
+    experiment_id: str,
+    algorithm_id: str,
+    brain_id: str,
+    scene_id: str,
+    scene_path: str,
+    seed: int,
+    status: str,
+    eval_fov_deg: float,
+    eval_reveal_radius_m: float,
+    environment: Optional[Mapping[str, Any]] = None,
+    extra: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Sidecar metadata so short folder names stay human-readable."""
+    info: Dict[str, Any] = {
+        "schema_version": PACKAGE_SCHEMA_VERSION,
+        "run_id": run_id,
+        "experiment_id": experiment_id,
+        "algorithm_id": algorithm_id,
+        "brain_id": brain_id,
+        "scene_id": scene_id,
+        "scene_path": scene_path,
+        "seed": int(seed),
+        "status": status,
+        "eval": {
+            "fov_deg": float(eval_fov_deg),
+            "reveal_radius_m": float(eval_reveal_radius_m),
+        },
+        "environment": dict(environment or {}),
+    }
+    if extra:
+        info.update(dict(extra))
+    return info
+
+
+def write_run_info(path: Path, info: Mapping[str, Any]) -> None:
+    atomic_write_text(path, json.dumps(dict(info), indent=2, sort_keys=True) + "\n")
+
+
 def build_manifest(
     *,
     run_id: str,
@@ -145,8 +186,11 @@ def write_run_package(
     summary: Mapping[str, Any],
     revisit_bins: Mapping[int, int],
     extra_paths: Optional[Mapping[str, str]] = None,
+    brain_id: str = "",
+    scene_path: str = "",
+    environment: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Write metrics/ layout + manifest. Media/logs paths may be filled later."""
+    """Write metrics/ layout + manifest + run_info. Media/logs paths may be filled later."""
     run_dir = Path(run_dir)
     metrics = run_dir / "metrics"
     media = run_dir / "media"
@@ -160,11 +204,27 @@ def write_run_package(
     write_summary_json(metrics / "summary.json", summary)
     write_revisit_bins_json(metrics / "revisit_bins.json", revisit_bins)
 
+    run_info = build_run_info(
+        run_id=run_id,
+        experiment_id=experiment_id,
+        algorithm_id=algorithm_id,
+        brain_id=brain_id or algorithm_id,
+        scene_id=scene_id,
+        scene_path=scene_path,
+        seed=seed,
+        status=status,
+        eval_fov_deg=eval_fov_deg,
+        eval_reveal_radius_m=eval_reveal_radius_m,
+        environment=environment,
+    )
+    write_run_info(run_dir / "run_info.json", run_info)
+
     paths: Dict[str, str] = {
         "coverage_vs_distance": "metrics/coverage_vs_distance.csv",
         "trajectory": "metrics/trajectory.csv",
         "summary": "metrics/summary.json",
         "revisit_bins": "metrics/revisit_bins.json",
+        "run_info": "run_info.json",
         "final_grid_map": "media/final_grid_map.png",
         "final_nav_plan": "media/final_nav_plan.png",
         "map_timelapse": "media/map_timelapse_10x.mp4",
@@ -185,7 +245,7 @@ def write_run_package(
         eval_reveal_radius_m=eval_reveal_radius_m,
         relative_paths=paths,
         byte_sizes=sizes,
-        extra={"total_bytes": total_package_bytes(sizes)},
+        extra={"total_bytes": total_package_bytes(sizes), "brain_id": brain_id or algorithm_id},
     )
     write_manifest(run_dir / "manifest.json", manifest)
     return manifest

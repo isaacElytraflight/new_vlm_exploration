@@ -26,6 +26,7 @@ include_directories(include)
 set(EXPLORER_MISSION_LIBS
   frontier_detection
   frontier_tree
+  exploration_brain
   discrete_navigator
   nav2_navigator
   wall_unstick
@@ -44,6 +45,13 @@ target_include_directories(frontier_tree PUBLIC
   $<INSTALL_INTERFACE:include>)
 ament_target_dependencies(frontier_tree explorer_msgs geometry_msgs)
 target_link_libraries(frontier_tree ${OpenCV_LIBS})
+
+add_library(exploration_brain src/exploration_brain.cpp)
+target_include_directories(exploration_brain PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+target_link_libraries(exploration_brain frontier_tree ${OpenCV_LIBS})
+ament_target_dependencies(exploration_brain explorer_msgs geometry_msgs)
 
 add_library(discrete_navigator src/discrete_navigator.cpp)
 target_include_directories(discrete_navigator PUBLIC
@@ -80,7 +88,7 @@ ament_target_dependencies(frontier_vlm_client_node
   rclcpp rclcpp_action sensor_msgs std_msgs explorer_msgs)
 
 add_executable(explore_node src/explore_node.cpp)
-target_link_libraries(explore_node frontier_detection frontier_tree discrete_navigator nav2_navigator wall_unstick)
+target_link_libraries(explore_node frontier_detection frontier_tree exploration_brain discrete_navigator nav2_navigator wall_unstick)
 ament_target_dependencies(explore_node
   rclcpp rclcpp_action tf2_ros nav_msgs sensor_msgs std_msgs geometry_msgs
   diagnostic_msgs explorer_msgs)
@@ -145,6 +153,11 @@ if(BUILD_TESTING)
   target_link_libraries(test_frontier_tree frontier_tree)
   target_include_directories(test_frontier_tree PUBLIC include)
   ament_target_dependencies(test_frontier_tree explorer_msgs geometry_msgs)
+
+  ament_add_gtest(test_exploration_brain test/test_exploration_brain.cpp)
+  target_link_libraries(test_exploration_brain exploration_brain)
+  target_include_directories(test_exploration_brain PUBLIC include)
+  ament_target_dependencies(test_exploration_brain explorer_msgs geometry_msgs)
 
   ament_add_gtest(test_discrete_navigator test/test_discrete_navigator.cpp)
   target_link_libraries(test_discrete_navigator discrete_navigator)

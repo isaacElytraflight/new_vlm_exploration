@@ -6,6 +6,88 @@ Add a new dated section at the top when you work on this repo.
 
 ---
 
+## 2026-09-08 — Goal C polish: brains UI, visited≠dead, zero-inflation, short package names
+
+**Intent:** Make ablations operable (pick brains), stop redundant 360° scans, escape corner traps after thrash, and keep artifact folders readable.
+
+### What changed
+
+| Area | Change |
+|------|--------|
+| **Ablation UI** | Checkboxes per `algorithms[].id`; `--algorithms` → `filter_algorithms` |
+| **Visited vs dead** | Tree `visited` ≠ `fully_explored`; scan only on first visit (`shouldPerformFrontierScan`) |
+| **Recovery** | After thrash ×5 → NavigateToPose with inflation 0 (Nav2 + mapper); else mark dead |
+| **Naming** | Fresh → `ablation_run_<ts>/`; cell → `{algo}_seedN/`; `run_info.json` + `campaign_info.json` |
+
+### Tests
+
+- Elytra `ablationRunner` (algorithms + `ablation_run_` experiment-id)
+- Pytest: `filter_algorithms`, `run_id_for`, `make_ablation_experiment_id`, package `run_info`
+- Gtest: wall_unstick zero-inflation; frontier/brain visited≠dead + scan gate
+
+### Note
+
+`elytra-bridge/` is gitignored in this repo; UI/runner changes live on the local Elytra tree only. Habitat experiment + mission code is what we commit.
+
+### Next
+
+Live Fresh smoke with selected brains; confirm package layout + events on disk.
+
+---
+
+## 2026-09-08 — Goal C: swappable brains (implementation complete; smoke pending)
+
+**Intent:** Ablations must compare real algorithms, not ROS param toggles on one tree+VLM loop.
+
+### What we shipped
+
+| Slice | Outcome |
+|-------|---------|
+| **C1 API** | `ExplorationBrain` + `createExplorationBrain`; flags `wantsVlmScores` / `usesFrontierTree` |
+| **C2 DFS lift** | `vlm_tree_dfs` owns `FrontierTree` (attach, VLM wait/soft-fail, DFS, batch pick, backtrack) |
+| **C3 thin node** | `explore_node` orchestrates only; param `brain_id` (default `vlm_tree_dfs`) |
+| **C4 greedy** | True `greedy_nearest` — Euclidean nearest, **no tree, no VLM** |
+| **C5 ablation** | `algorithms[].brain` → `/data/selected_brain.id` → `start_sim.sh` `brain_id:=`; greedy profile fixed |
+| **Logging** | Msgs + logger: `exploration/brain/decision`, `graph_edges`, `vlm/choice` |
+| **Graph / choice** | `vlm_frontier_graph` + `vlm_choice_dijkstra` (v1 proxies — see below) |
+| **Smoke YAML** | `experiments/configs/smoke.yaml` → Fresh folders `ablation_run_<ts>` (4×1×2 = 8 cells) |
+
+### Key files
+
+- `explorer_mission/.../exploration_brain.hpp|.cpp` + `test_exploration_brain.cpp`
+- `explore_node.cpp`, launch `brain_id` args
+- `experiments/profiles.py`, `config.py`, `orchestrator.py`, `event_shapes.py`
+- `sim/scripts/start_sim.sh`, `apply_exploration_profile.sh`, `experiment_event_logger.py`
+- Msgs: `BrainDecisionEvent`, `BrainGraphEdges`, `VlmChoiceEvent`
+
+### Tests
+
+- Brain gtest **25/25** (in `habitat3-sim`)
+- Pytest config / brain wiring / event shapes **32**
+
+### Infra this session
+
+- Elytra Bridge `npm run dev` (5173 / 8787)
+- `habitat3-sim` up for colcon build/test
+
+### Known limits (do not treat as thesis-final)
+
+1. Graph edge costs = **Euclidean kNN**, not Nav2 path length  
+2. Choice brain = **score-argmax** among Dijkstra candidates + logged prompt/response — not a true multi-image “pick one” VLM call yet  
+
+### What did *not* happen yet
+
+- Live 8-cell smoke campaign under Elytra Fresh/Resume  
+- Verification of event fields inside packaged `logs/events.jsonl.gz` from a real run  
+
+### Next
+
+1. Run smoke (`smoke.yaml` / Fresh campaign)  
+2. Spot-check packages for decision / graph_edges / vlm/choice  
+3. Then: Nav2 costs + true VLM choice, or paper-eval scale (Goal 1)
+
+---
+
 ## 2026-09-07 — Milestone B2.1 closeout (document + push)
 
 **Shipped this arc:** run packages + resume/fresh campaigns, media finalize/cleanup, Elytra campaign radios, resilient tmux start, return-home abandon, DiscreteMove thrash unstick (BACK/FWD×growing, max 5). Docs: `FUTURE_GOALS.md`, `design_doc.md` recovery note.

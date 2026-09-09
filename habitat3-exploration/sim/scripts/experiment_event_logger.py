@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Text-only ROS event logger for ablation run packages.
 
-Writes JSONL (optionally gzip) for exploration/status, frontier_tree, and
-vlm/scores — never image payloads.
+Writes JSONL (optionally gzip) for exploration/status, frontier_tree,
+vlm/scores, brain/decision, brain/graph_edges, and vlm/choice — never images.
+
+Schema helpers for offline tests live in experiments/event_shapes.py (host);
+this script stays self-contained for the container (/workspace/scripts only).
 """
 
 from __future__ import annotations
@@ -10,7 +13,6 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
-import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,9 +20,12 @@ from typing import Any, Dict, List, Optional, TextIO
 
 import rclpy
 from explorer_msgs.msg import (
+    BrainDecisionEvent,
+    BrainGraphEdges,
     ExplorationStatus,
     FrontierOpennessScores,
     FrontierTree,
+    VlmChoiceEvent,
 )
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -71,6 +76,15 @@ class EventLogger(Node):
         self.create_subscription(
             FrontierOpennessScores, "exploration/vlm/scores", self._scores_cb, 10
         )
+        self.create_subscription(
+            BrainDecisionEvent, "exploration/brain/decision", self._brain_decision_cb, status_qos
+        )
+        self.create_subscription(
+            BrainGraphEdges, "exploration/brain/graph_edges", self._graph_edges_cb, status_qos
+        )
+        self.create_subscription(
+            VlmChoiceEvent, "exploration/vlm/choice", self._vlm_choice_cb, 10
+        )
         self.create_timer(0.5, self._check_stop)
 
     def _check_stop(self) -> None:
@@ -88,7 +102,6 @@ class EventLogger(Node):
             separators=(",", ":"),
             ensure_ascii=True,
         )
-        # Soft truncate oversized reasoning fields already handled by callers.
         payload = line + "\n"
         if self._bytes_written + len(payload.encode("utf-8")) > self._max_bytes:
             self._closed = True
@@ -139,6 +152,47 @@ class EventLogger(Node):
                 "frontier_ids": [int(i) for i in msg.frontier_ids],
                 "scores": [int(s) for s in msg.scores],
                 "reasonings": reasonings,
+            },
+        )
+
+    def _brain_decision_cb(self, msg: BrainDecisionEvent) -> None:
+        self._emit(
+            "exploration/brain/decision",
+            {
+                "brain_id": str(msg.brain_id),
+                "action": str(msg.action),
+                "goal_id": int(msg.goal_id),
+                "goal_x": float(msg.goal_x),
+                "goal_y": float(msg.goal_y),
+                "detail": str(msg.detail)[:240],
+                "visited_ids": [int(i) for i in msg.visited_ids],
+                "live_ids": [int(i) for i in msg.live_ids],
+            },
+        )
+
+    def _graph_edges_cb(self, msg: BrainGraphEdges) -> None:
+        if not (len(msg.from_ids) == len(msg.to_ids) == len(msg.costs)):
+            self.get_logger().warn("Dropping malformed graph_edges (length mismatch)")
+            return
+        self._emit(
+            "exploration/brain/graph_edges",
+            {
+                "brain_id": str(msg.brain_id),
+                "from_ids": [int(i) for i in msg.from_ids],
+                "to_ids": [int(i) for i in msg.to_ids],
+                "costs": [float(c) for c in msg.costs],
+            },
+        )
+
+    def _vlm_choice_cb(self, msg: VlmChoiceEvent) -> None:
+        self._emit(
+            "exploration/vlm/choice",
+            {
+                "brain_id": str(msg.brain_id),
+                "prompt": str(msg.prompt)[:2000],
+                "response": str(msg.response)[:2000],
+                "selected_frontier_id": int(msg.selected_frontier_id),
+                "candidate_ids": [int(i) for i in msg.candidate_ids],
             },
         )
 

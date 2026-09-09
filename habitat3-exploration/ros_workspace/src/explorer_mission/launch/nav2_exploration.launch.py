@@ -22,6 +22,7 @@ def generate_launch_description() -> LaunchDescription:
     realtime_mode = LaunchConfiguration("realtime_mode")
     navigation_mode = LaunchConfiguration("navigation_mode")
     frontiers_grid_topic = LaunchConfiguration("frontiers_grid_topic")
+    brain_id = LaunchConfiguration("brain_id")
 
     exploration_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
@@ -35,6 +36,7 @@ def generate_launch_description() -> LaunchDescription:
             "use_privileged_map": use_privileged_map,
             "grid_topic": frontiers_grid_topic,
             "navigation_mode": navigation_mode,
+            "brain_id": brain_id,
         }.items(),
     )
 
@@ -62,6 +64,7 @@ def generate_launch_description() -> LaunchDescription:
             "frontiers_grid_topic",
             default_value="/global_costmap/costmap",
         ),
+        DeclareLaunchArgument("brain_id", default_value="vlm_tree_dfs"),
 
         exploration_launch,
 
