@@ -1,0 +1,39 @@
+# Greedy brain stress test: repeated runs on corner-heavy scenes.
+# Purpose: Reproduce "robot gets stuck in corners" with greedy_nearest brain.
+#
+# Usage:
+#   python -m experiments.orchestrator --config experiments/configs/greedy_stress.yaml --fresh
+#
+# Success criteria:
+#   - final_coverage >= 0.89 AND termination_reason=success
+#
+# Failure signals:
+#   - termination_reason=stuck (early termination)
+#   - termination_reason=success but final_coverage < 0.80 (false completion)
+#   - All frontiers marked dead before 89% coverage
+
+experiment_id: greedy_stress_test
+n_runs_per_cell: 5
+timeout_s: 1200  # 20 min — enough to succeed or get definitively stuck
+artifact_root: sim/data/experiments
+
+eval:
+  fov_deg: 360
+  reveal_radius_m: 5.0
+
+algorithms:
+  - id: greedy_nearest
+    brain: greedy_nearest
+
+# Scenes to test — start with smoke scene, add corner-heavy ones as identified.
+# Matterport scenes with narrow corridors and corners are ideal stress tests.
+scenes:
+  - JmbYfDe2QKZ   # Smoke test scene (default)
+  # Uncomment additional scenes as researcher identifies corner-heavy environments:
+  # - 8WUmhLawc2A
+  # - X7HyMhZNoso
+  # - 1pXnuDYAj8r
+
+seeds:
+  mode: sequential
+  start: 0
