@@ -241,13 +241,35 @@ Based on code analysis, the stuck-in-corners failure may involve:
 
 ## 3. Reproduction Plan: Greedy Ablation Runs
 
-### 3.1 Launch Configuration
+### 3.1 Target Scene: Matterport3D `JmbYfDe2QKZ`
 
-**Experiment YAML:** Create `experiments/configs/greedy_stress.yaml`
+The target world is the **Matterport3D house `JmbYfDe2QKZ`** — that's the "long funny alphanumeric string" scene name.
+
+| Property | Value |
+|----------|-------|
+| **Scene ID** | `JmbYfDe2QKZ` |
+| **Container path** | `/data/scene_datasets/mp3d/JmbYfDe2QKZ/JmbYfDe2QKZ.glb` |
+| **Host path** | `habitat3-exploration/sim/data/scene_datasets/mp3d/JmbYfDe2QKZ/` |
+| **Config key** | `scenes: [JmbYfDe2QKZ]` in experiment YAML |
+| **Elytra selector** | Scene dropdown → "Matterport JmbYfDe2QKZ" |
+
+**Prerequisites:** The scene must be downloaded separately (Matterport ToS):
+```bash
+# On the researcher's machine, if not already present:
+python habitat3-exploration/sim/scripts/download_mp3d_habitat_scene.py \
+  --i-agree-to-mp-tos --scene JmbYfDe2QKZ
+
+# Verify:
+ls habitat3-exploration/sim/data/scene_datasets/mp3d/JmbYfDe2QKZ/JmbYfDe2QKZ.glb
+```
+
+### 3.2 Experiment Config
+
+**File:** `experiments/configs/greedy_stress.yaml` (already created in this PR)
 
 ```yaml
 experiment_id: greedy_stress_test
-n_runs_per_cell: 5  # Multiple seeds per scene
+n_runs_per_cell: 5  # Multiple seeds for statistical significance
 timeout_s: 1200     # 20 min per episode (enough to get stuck or succeed)
 artifact_root: sim/data/experiments
 
@@ -259,42 +281,104 @@ algorithms:
   - id: greedy_nearest
     brain: greedy_nearest
 
+# Matterport3D scene: JmbYfDe2QKZ
+# Resolves to: /data/scene_datasets/mp3d/JmbYfDe2QKZ/JmbYfDe2QKZ.glb
 scenes:
-  # Scenes known to have corners/corridors:
-  - JmbYfDe2QKZ   # Smoke test scene
-  # Add more corner-heavy scenes as identified
+  - JmbYfDe2QKZ
 
 seeds:
   mode: sequential
   start: 0
 ```
 
-### 3.2 Launch Commands (On Researcher's Machine)
+### 3.3 Launch Commands (On Researcher's Machine)
+
+**Option A: Via Elytra UI (Recommended)**
 
 ```bash
 # 1. Start Elytra bridge
-cd elytra-bridge/application
+cd new_vlm_exploration/elytra-bridge/application
+cp backend/.env.example backend/.env  # first time only
 npm run dev
+# Frontend: http://localhost:5173
+# Backend: http://localhost:8787
 
 # 2. Start Habitat sim container
-cd habitat3-exploration/sim/docker
+cd new_vlm_exploration/habitat3-exploration/sim/docker
 docker compose --env-file ../.env up -d sim
+# noVNC: http://localhost:6080
 
-# 3. Run ablation via Elytra UI:
-#    - Select habitat3-exploration project
-#    - Mode: sim
-#    - Connect
-#    - Load config: greedy_stress.yaml
-#    - Run Ablation
+# 3. In Elytra UI:
+#    a. Select project: habitat3-exploration
+#    b. Mode: sim
+#    c. Click "Connect" (backend runs docker compose build/up)
+#    d. Scene dropdown → "Matterport JmbYfDe2QKZ" (should be default)
+#    e. Load experiment config: experiments/configs/greedy_stress.yaml
+#    f. Click "Run Ablation"
+```
 
-# OR via orchestrator directly:
-cd habitat3-exploration
+**Option B: Via CLI Orchestrator**
+
+```bash
+cd new_vlm_exploration/habitat3-exploration
+
+# Ensure container is running
+cd sim/docker && docker compose --env-file ../.env up -d sim && cd ../..
+
+# Run ablation
 python -m experiments.orchestrator \
   --config experiments/configs/greedy_stress.yaml \
   --fresh
 ```
 
-### 3.3 Success/Fail Criteria
+**Option C: Single Manual Episode (for debugging)**
+
+```bash
+# Inside container, set brain and scene:
+docker exec habitat3-sim bash -lc '
+  echo "greedy_nearest" > /data/selected_brain.id
+  echo "/data/scene_datasets/mp3d/JmbYfDe2QKZ/JmbYfDe2QKZ.glb" > /data/selected_scene.path
+'
+
+# Start episode via tmux (from Elytra or manually):
+docker exec habitat3-sim bash -lc '
+  tmux kill-session -t habitat 2>/dev/null || true
+  tmux new-session -d -s habitat "bash /workspace/scripts/start_sim.sh"
+'
+
+# Watch exploration status:
+docker exec -it habitat3-sim bash -lc '
+  source /opt/ros/jazzy/setup.bash
+  source /opt/explorer_workspace/ros_workspace/install/setup.bash
+  ros2 topic echo /exploration/status
+'
+```
+
+### 3.4 Scene Selection Flow
+
+The scene reaches Habitat through this chain:
+
+```
+Experiment YAML           Elytra UI dropdown         Environment variable
+scenes: [JmbYfDe2QKZ] OR  "Matterport JmbYfDe2QKZ" OR HABITAT_SCENE=...
+        │                         │                         │
+        ▼                         ▼                         │
+orchestrator._prepare_scene()     PUT /sim/habitat-scene    │
+        │                         │                         │
+        ▼                         ▼                         │
+/data/selected_scene.path ◀───────┘                         │
+        │                                                   │
+        ▼                                                   │
+start_sim.sh reads selected_scene.path ─────────────────────┘
+        │
+        ▼
+export HABITAT_SCENE="/data/scene_datasets/mp3d/JmbYfDe2QKZ/JmbYfDe2QKZ.glb"
+        │
+        ▼
+habitat_engine.py loads scene
+```
+
+### 3.5 Success/Fail Criteria
 
 | Outcome | Criteria |
 |---------|----------|
@@ -303,7 +387,7 @@ python -m experiments.orchestrator \
 | **Pseudo-Success** | `termination_reason=success` but `final_coverage < 0.80` (false completion) |
 | **Timeout** | `termination_reason=timeout` (episode hit 20min limit) |
 
-### 3.4 Metrics to Record Per Run
+### 3.6 Metrics to Record Per Run
 
 Already collected by `experiment_collect.py` and `experiment_event_logger.py`:
 - `final_coverage` (float 0-1)
@@ -438,28 +522,35 @@ From container (if available):
 
 ## 5. Questions / Blockers Requiring Local Environment
 
-The following cannot be answered from code alone and require running the actual Elytra + Habitat stack:
+The following cannot be answered from code alone and require running the actual Elytra + Habitat stack with the **Matterport JmbYfDe2QKZ** scene:
 
-1. **Which specific scenes/seeds trigger stuck?**
-   - Need to run `greedy_stress.yaml` ablation and analyze results
+1. **Which seeds trigger stuck on JmbYfDe2QKZ?**
+   - Need to run `greedy_stress.yaml` ablation (5 seeds) and analyze results
+   - Identify reproducible spawn positions that lead to corner traps
 
 2. **What is the typical clearance value when stuck occurs?**
    - Need to capture `start_clearance_m` from live runs
+   - Compare threshold (0.25m) vs actual clearances at failure points
 
 3. **Are frontiers being placed in actually-navigable locations?**
    - Need to overlay inset frontier positions on costmap
+   - Check if 0.35m inset is sufficient in JmbYfDe2QKZ corridors
 
 4. **Does the costmap show the corner as occupied or free?**
    - Need to snapshot costmap at failure time
+   - Compare Nav2 costmap vs Habitat ground-truth geometry
 
 5. **Is RPP failing to follow a valid plan, or is the plan itself bad?**
    - Need to capture controller logs during failure
+   - Determine if NavFn plans through JmbYfDe2QKZ corridors are followable
 
 6. **Does inflation=0 recovery help in corners?**
-   - Already implemented but need to measure success rate
+   - Already implemented but need to measure success rate on JmbYfDe2QKZ
+   - May need to adjust recovery strategy for this specific scene geometry
 
-7. **Are there specific Matterport scenes that are corner-heavy?**
-   - Need to profile scene geometry or use researcher's domain knowledge
+7. **What are the corridor widths in JmbYfDe2QKZ?**
+   - Measure actual corridor widths vs inflation diameter (2×0.22m = 0.44m)
+   - Identify choke points where inflation could block all paths
 
 ---
 
@@ -558,7 +649,39 @@ bool isDefinitiveGoalUnreachable(uint16_t compute_path_error_code)
 
 ---
 
-## Appendix B: Related JOURNAL Entries
+## Appendix B: Matterport JmbYfDe2QKZ Scene Details
+
+The target scene for Greedy stuck reproduction:
+
+| Property | Value |
+|----------|-------|
+| Scene ID | `JmbYfDe2QKZ` |
+| Type | Matterport3D house |
+| Container path | `/data/scene_datasets/mp3d/JmbYfDe2QKZ/JmbYfDe2QKZ.glb` |
+| Host path (bind-mounted) | `sim/data/scene_datasets/mp3d/JmbYfDe2QKZ/` |
+| Navmesh | `JmbYfDe2QKZ.navmesh` |
+| Spawn constraint | Ground floor (via floor_constraint.py, `agent_max_climb=0.15`) |
+
+**Scene characteristics (from JOURNAL):**
+- Multi-floor house with stairs
+- Default spawn was upper floor; now constrained to ground floor
+- Corridors and corners present (good for stuck testing)
+- Navmesh rebaked to prevent stair climbing
+
+**File layout on host:**
+```
+habitat3-exploration/sim/data/scene_datasets/mp3d/
+├── mp3d.scene_dataset_config.json
+└── JmbYfDe2QKZ/
+    ├── JmbYfDe2QKZ.glb      # Main mesh
+    ├── JmbYfDe2QKZ.navmesh  # Navigation mesh
+    ├── JmbYfDe2QKZ.house    # Metadata
+    └── JmbYfDe2QKZ_semantic.ply
+```
+
+---
+
+## Appendix C: Related JOURNAL Entries
 
 Key entries from `JOURNAL.md` documenting prior stuck debugging:
 
