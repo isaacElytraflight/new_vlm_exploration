@@ -1,0 +1,46 @@
+# Greedy brain stress test: repeated runs on the Matterport JmbYfDe2QKZ scene.
+# Purpose: Reproduce "robot gets stuck in corners" with greedy_nearest brain.
+#
+# Target scene: Matterport3D JmbYfDe2QKZ
+#   - Container path: /data/scene_datasets/mp3d/JmbYfDe2QKZ/JmbYfDe2QKZ.glb
+#   - Must be downloaded separately (Matterport ToS): see README "Matterport3D default scene"
+#   - This is the default research scene with corridors and corners
+#
+# Usage:
+#   python -m experiments.orchestrator --config experiments/configs/greedy_stress.yaml --fresh
+#
+# Or via Elytra UI:
+#   1. Scene dropdown → "Matterport JmbYfDe2QKZ" (default)
+#   2. Load config: experiments/configs/greedy_stress.yaml
+#   3. Run Ablation
+#
+# Success criteria:
+#   - final_coverage >= 0.89 AND termination_reason=success
+#
+# Failure signals:
+#   - termination_reason=stuck (early termination)
+#   - termination_reason=success but final_coverage < 0.80 (false completion)
+#   - All frontiers marked dead before 89% coverage
+
+experiment_id: greedy_stress_test
+n_runs_per_cell: 5
+timeout_s: 1200  # 20 min — enough to succeed or get definitively stuck
+artifact_root: sim/data/experiments
+
+eval:
+  fov_deg: 360
+  reveal_radius_m: 5.0
+
+algorithms:
+  - id: greedy_nearest
+    brain: greedy_nearest
+
+# Matterport3D scene: JmbYfDe2QKZ (the "long alphanumeric" Matterport house)
+# This is the primary research scene with corridors and corners for stuck testing.
+# Scene resolves to: /data/scene_datasets/mp3d/JmbYfDe2QKZ/JmbYfDe2QKZ.glb
+scenes:
+  - JmbYfDe2QKZ
+
+seeds:
+  mode: sequential
+  start: 0
