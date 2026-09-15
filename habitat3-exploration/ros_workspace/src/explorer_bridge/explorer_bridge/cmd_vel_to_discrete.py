@@ -16,8 +16,12 @@ class CmdVelThresholds:
     angular_threshold: float = 0.05
     linear_threshold: float = 0.03
     # Curvature gate: |angular|/|linear| (rad/m). Above → turn; below → drive.
-    # Mild path following is typically ~0.5; sharp wall-around arcs exceed ~1.0.
-    turn_over_drive_ratio: float = 1.0
+    # 0.5 catches mild RPP corner arcs (~0.48) that ratio=1.0 used to FORWARD
+    # straight into walls (0.25 m Habitat steps).
+    turn_over_drive_ratio: float = 0.5
+    # Absolute heading gate: never FORWARD while |angular| >= this, even if
+    # curvature ratio is low. Matches coarse 0.25 m discrete steps.
+    drive_max_angular: float = 0.12
     # Once turning, ignore opposite angular below this — unless we have already
     # committed max_turn_steps_before_flip (≈180°), then allow the short way.
     turn_flip_angular_threshold: float = 0.2
@@ -61,9 +65,10 @@ def cmd_vel_to_intent(
 ) -> Optional[DiscreteMoveIntent]:
     """Return a single discrete step intent, or None if below thresholds.
 
-    Prefer **drive** when linear is significant and curvature is mild.
-    If |angular_z|/|linear_x| >= turn_over_drive_ratio, prefer **turn** so
-    sharp RPP arcs (wall-around) are not quantized into straight collisions.
+    Prefer **drive** only when linear is significant and heading is roughly
+    aligned. Prefer **turn** when:
+    - |angular_z|/|linear_x| >= turn_over_drive_ratio, or
+    - |angular_z| >= drive_max_angular (absolute heading gate for 0.25 m steps).
     Rotate-in-place when linear is below threshold.
 
     When already turning, require |angular_z| >= turn_flip_angular_threshold to
@@ -75,11 +80,12 @@ def cmd_vel_to_intent(
     abs_ang = abs(angular_z)
 
     if abs_lin > t.linear_threshold:
-        prefer_turn = (
+        high_curvature = (
             abs_ang > t.angular_threshold
             and (abs_ang / abs_lin) >= t.turn_over_drive_ratio
         )
-        if prefer_turn:
+        heading_misaligned = abs_ang >= t.drive_max_angular
+        if high_curvature or heading_misaligned:
             return _turn_intent(angular_z, t, last_turn_direction, consecutive_turn_steps)
         direction = (
             DiscreteMove.Goal.FORWARD if linear_x > 0 else DiscreteMove.Goal.BACKWARD

@@ -205,6 +205,35 @@ TEST(FrontierDetection, DedupeSameBatchKeepsFar_negative)
   EXPECT_EQ(deduped.size(), 2u);
 }
 
+TEST(FrontierInset, MovesIntoKnownFree_Positive)
+{
+  // Free strip on left, unknown on right; midpoint on the boundary → inset left.
+  nav_msgs::msg::OccupancyGrid grid;
+  grid.info.width = 40;
+  grid.info.height = 20;
+  grid.info.resolution = 0.05;
+  grid.info.origin.position.x = 0.0;
+  grid.info.origin.position.y = 0.0;
+  grid.data.assign(40 * 20, -1);
+  for (int r = 0; r < 20; ++r) {
+    for (int c = 0; c < 20; ++c) {
+      grid.data[r * 40 + c] = 0;
+    }
+  }
+  const cv::Point2f mid = explorer_mission::pixelToWorld(cv::Point(19, 10), grid);
+  const cv::Point2f inset = explorer_mission::insetFrontierGoalWorld(grid, mid, 0.35);
+  EXPECT_LT(inset.x, mid.x);
+}
+
+TEST(FrontierInset, NonPositiveInsetLeavesPose_Negative)
+{
+  const auto grid = makeTestGrid();
+  const cv::Point2f mid(0.25f, 0.25f);
+  const cv::Point2f out = explorer_mission::insetFrontierGoalWorld(grid, mid, 0.0);
+  EXPECT_FLOAT_EQ(out.x, mid.x);
+  EXPECT_FLOAT_EQ(out.y, mid.y);
+}
+
 int main(int argc, char ** argv)
 {
   ::testing::InitGoogleTest(&argc, argv);

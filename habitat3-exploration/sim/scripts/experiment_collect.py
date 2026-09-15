@@ -67,6 +67,7 @@ class ExperimentCollector(Node):
         self._complete = False
         self._phase = "waiting"
         self._detail = "waiting for exploration/status"
+        self._termination_reason = ""
         self._distance_m = 0.0
         self._prev_xy: Optional[Tuple[float, float]] = None
         self._trajectory: List[List[float]] = []
@@ -96,8 +97,14 @@ class ExperimentCollector(Node):
     def _status_cb(self, msg: ExplorationStatus) -> None:
         self._phase = str(msg.phase)
         self._detail = str(msg.detail)
+        reason = str(getattr(msg, "termination_reason", "") or "")
+        if reason:
+            self._termination_reason = reason
         if bool(msg.exploration_complete):
             self._complete = True
+            if not self._termination_reason:
+                # Older explore builds: infer success when complete without a reason.
+                self._termination_reason = "success"
         self._maybe_write_progress()
 
     def _odom_cb(self, msg: Odometry) -> None:
@@ -175,6 +182,9 @@ class ExperimentCollector(Node):
         return {
             "status": status,
             "error_message": error_message,
+            "termination_reason": self._termination_reason or (
+                "timeout" if status == "timeout" else ("unknown" if status != "completed" else "success")
+            ),
             "started_at": self._started_at,
             "finished_at": utc_now_iso(),
             "duration_s": float(elapsed),

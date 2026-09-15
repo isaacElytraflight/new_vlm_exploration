@@ -8,7 +8,12 @@ from nav_msgs.msg import OccupancyGrid
 from std_msgs.msg import Header
 
 from explorer_mission.maprender_node import (
+    COLOR_UNVISITED_ALIVE,
+    COLOR_UNVISITED_DEAD,
+    COLOR_VISITED_ALIVE,
+    COLOR_VISITED_DEAD,
     NOT_RATED,
+    frontier_dot_bgr,
     occupancy_to_bgr,
     openness_label_text,
 )
@@ -62,6 +67,17 @@ def test_openness_label_0_to_5_positive():
 
 def test_openness_label_not_rated_negative():
     assert openness_label_text(NOT_RATED) is None
+
+
+def test_frontier_dot_colors_positive():
+    assert frontier_dot_bgr(visited=False, dead=False) == COLOR_UNVISITED_ALIVE
+    assert frontier_dot_bgr(visited=True, dead=False) == COLOR_VISITED_ALIVE
+    assert frontier_dot_bgr(visited=True, dead=True) == COLOR_VISITED_DEAD
+    assert frontier_dot_bgr(visited=False, dead=True) == COLOR_UNVISITED_DEAD
+
+
+def test_frontier_dot_unvisited_alive_not_grey_negative():
+    assert frontier_dot_bgr(visited=False, dead=False) != COLOR_UNVISITED_DEAD
 
 
 def test_occupancy_to_bgr_is_grayscale_positive():

@@ -6,6 +6,7 @@ import pytest
 from explorer_msgs.action import DiscreteMove
 
 from explorer_bridge.cmd_vel_to_discrete import (
+    CmdVelThresholds,
     apply_realtime_rate_cap,
     cmd_vel_to_intent,
 )
@@ -34,26 +35,30 @@ def test_cmd_vel_slow_rotate_accepted_positive():
     assert intent.direction == DiscreteMove.Goal.TURN_LEFT
 
 
-def test_cmd_vel_forward_positive():
-    intent = cmd_vel_to_intent(0.2, 0.0)
+def test_cmd_vel_forward_straight_positive():
+    """Straight path follow: linear with zero angular → FORWARD."""
+    intent = cmd_vel_to_intent(0.25, 0.0)
     assert intent is not None
     assert intent.direction == DiscreteMove.Goal.FORWARD
 
 
-def test_cmd_vel_drive_with_curvature_prefers_forward_positive():
-    """RPP path follow: linear + mild angular must step forward, not spin-jitter."""
-    # |ang|/|lin| = 0.12/0.25 = 0.48 < default turn_over_drive_ratio (1.0)
+def test_cmd_vel_mild_corner_prefers_turn_positive():
+    """Mild RPP corner arc must TURN, not 0.25 m FORWARD into walls.
+
+    |ang|/|lin| = 0.12/0.25 = 0.48 < old ratio=1.0 (drove) but hits
+    drive_max_angular=0.12 heading gate → TURN.
+    """
     intent = cmd_vel_to_intent(0.25, 0.12)
     assert intent is not None
-    assert intent.direction == DiscreteMove.Goal.FORWARD
+    assert intent.direction == DiscreteMove.Goal.TURN_LEFT
 
 
-def test_cmd_vel_curvature_must_not_force_turn_negative():
-    """Negative: old angular-first priority caused align-then-step jitter."""
+def test_cmd_vel_mild_corner_must_not_drive_negative():
+    """Negative: ratio=1.0 + no heading gate used to plow FORWARD on corners."""
     intent = cmd_vel_to_intent(0.25, 0.12)
     assert intent is not None
-    assert intent.direction != DiscreteMove.Goal.TURN_LEFT
-    assert intent.direction != DiscreteMove.Goal.TURN_RIGHT
+    assert intent.direction != DiscreteMove.Goal.FORWARD
+    assert intent.direction != DiscreteMove.Goal.BACKWARD
 
 
 def test_cmd_vel_high_curvature_prefers_turn_positive():
@@ -64,12 +69,21 @@ def test_cmd_vel_high_curvature_prefers_turn_positive():
     assert intent.direction == DiscreteMove.Goal.TURN_LEFT
 
 
-def test_cmd_vel_ratio_below_threshold_stays_forward_negative():
-    """Negative: ratio just under threshold must not flip back to angular-first."""
-    # 0.24/0.25 = 0.96 < 1.0 → still drive
-    intent = cmd_vel_to_intent(0.25, 0.24)
+def test_cmd_vel_ratio_and_gate_below_stays_forward_negative():
+    """Negative: low curvature AND aligned heading must still drive (anti spin-jitter)."""
+    # 0.08/0.25 = 0.32 < 0.5 and |ang| 0.08 < drive_max_angular 0.12 → FORWARD
+    intent = cmd_vel_to_intent(0.25, 0.08)
     assert intent is not None
     assert intent.direction == DiscreteMove.Goal.FORWARD
+
+
+def test_cmd_vel_ratio_alone_triggers_turn_positive():
+    """Curvature above turn_over_drive_ratio turns even if under drive_max_angular."""
+    # Override gate high so only ratio matters: 0.15/0.25 = 0.6 >= 0.5
+    t = CmdVelThresholds(drive_max_angular=1.0)
+    intent = cmd_vel_to_intent(0.25, 0.15, thresholds=t)
+    assert intent is not None
+    assert intent.direction == DiscreteMove.Goal.TURN_LEFT
 
 
 def test_cmd_vel_below_threshold_negative():

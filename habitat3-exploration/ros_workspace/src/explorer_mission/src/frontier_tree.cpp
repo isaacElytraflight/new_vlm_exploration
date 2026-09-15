@@ -318,6 +318,7 @@ explorer_msgs::msg::FrontierTree FrontierTree::toMsg(
     out.children_ids = node.children_ids;
     out.openness_score = node.openness_score;
     out.fully_explored = node.fully_explored;
+    out.visited = node.visited;
     msg.nodes.push_back(out);
   }
   return msg;

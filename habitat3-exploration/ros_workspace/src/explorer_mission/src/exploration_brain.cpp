@@ -140,6 +140,22 @@ public:
     return it == scores_.end() ? kOpennessUnset : it->second;
   }
 
+  std::vector<BrainVizNode> vizNodes() const
+  {
+    std::vector<BrainVizNode> out;
+    out.reserve(nodes_.size());
+    for (const auto & entry : nodes_) {
+      BrainVizNode n;
+      n.id = entry.first;
+      n.position = entry.second;
+      n.visited = visited_.count(entry.first) != 0;
+      n.dead = dead_.count(entry.first) != 0;
+      n.openness_score = score(entry.first);
+      out.push_back(n);
+    }
+    return out;
+  }
+
   std::vector<uint32_t> liveIds() const
   {
     std::vector<uint32_t> out;
@@ -430,6 +446,7 @@ public:
       d.goal_id = parent_id;
       d.goal = parent->position;
       d.detail = "backtracking to parent";
+      d.theoretical = true;
       return d;
     }
 
@@ -483,11 +500,42 @@ public:
   bool isVisited(uint32_t id) const override {return visited_.count(id) != 0;}
   bool isDead(uint32_t id) const override {return dead_.count(id) != 0;}
 
+  std::vector<BrainVizNode> vizNodes() const override
+  {
+    std::vector<BrainVizNode> out;
+    out.reserve(live_.size() + poses_.size());
+    for (const auto & f : live_) {
+      BrainVizNode n;
+      n.id = f.id;
+      n.position = f.position;
+      n.visited = false;
+      n.dead = false;
+      n.openness_score = 255;
+      out.push_back(n);
+    }
+    for (const auto & entry : poses_) {
+      const bool visited = visited_.count(entry.first) != 0;
+      const bool dead = dead_.count(entry.first) != 0;
+      if (!visited && !dead) {
+        continue;
+      }
+      BrainVizNode n;
+      n.id = entry.first;
+      n.position = entry.second;
+      n.visited = visited;
+      n.dead = dead;
+      n.openness_score = 255;
+      out.push_back(n);
+    }
+    return out;
+  }
+
   void onEpisodeStart(const cv::Point2f & /*start_pose*/) override
   {
     live_.clear();
     visited_.clear();
     dead_.clear();
+    poses_.clear();
   }
 
   std::vector<uint32_t> onFrontiersDetected(
@@ -500,6 +548,7 @@ public:
         continue;
       }
       live_.push_back(f);
+      poses_[f.id] = f.position;
       accepted.push_back(f.id);
     }
     return accepted;
@@ -508,9 +557,10 @@ public:
   void onVlmScores(const std::unordered_map<uint32_t, uint8_t> & /*scores*/) override {}
   void softFailUnrated(uint8_t /*score*/) override {}
 
-  void onArrived(uint32_t goal_id, const cv::Point2f & /*pose*/) override
+  void onArrived(uint32_t goal_id, const cv::Point2f & pose) override
   {
     visited_.insert(goal_id);
+    poses_[goal_id] = pose;
     eraseLive(goal_id);
   }
 
@@ -518,6 +568,12 @@ public:
   {
     if (mark_dead) {
       dead_.insert(goal_id);
+      for (const auto & f : live_) {
+        if (f.id == goal_id) {
+          poses_[goal_id] = f.position;
+          break;
+        }
+      }
       eraseLive(goal_id);
     }
   }
@@ -566,6 +622,7 @@ private:
   std::vector<FrontierCandidate> live_;
   std::unordered_set<uint32_t> visited_;
   std::unordered_set<uint32_t> dead_;
+  std::unordered_map<uint32_t, cv::Point2f> poses_;
 };
 
 class VlmFrontierGraphBrain final : public ExplorationBrain
@@ -584,6 +641,12 @@ public:
   std::vector<uint32_t> liveFrontierIds() const override {return graph_.liveIds();}
   bool isVisited(uint32_t id) const override {return graph_.isVisited(id);}
   bool isDead(uint32_t id) const override {return graph_.isDead(id);}
+
+  std::vector<BrainVizNode> vizNodes() const override {return graph_.vizNodes();}
+  uint32_t vizCurrentNodeId() const override
+  {
+    return graph_.haveCurrent() ? graph_.currentId() : 0;
+  }
 
   std::vector<GraphEdge> takePendingGraphEdges() override
   {
@@ -724,6 +787,12 @@ public:
   std::vector<uint32_t> liveFrontierIds() const override {return graph_.liveIds();}
   bool isVisited(uint32_t id) const override {return graph_.isVisited(id);}
   bool isDead(uint32_t id) const override {return graph_.isDead(id);}
+
+  std::vector<BrainVizNode> vizNodes() const override {return graph_.vizNodes();}
+  uint32_t vizCurrentNodeId() const override
+  {
+    return graph_.haveCurrent() ? graph_.currentId() : 0;
+  }
 
   std::vector<GraphEdge> takePendingGraphEdges() override
   {

@@ -1,5 +1,6 @@
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -117,6 +118,58 @@ TEST(GreedyNearestBrain, NeverWantsVlmOrTree_Negative)
   const std::unique_ptr<ExplorationBrain> brain = createExplorationBrain("greedy_nearest");
   EXPECT_FALSE(brain->wantsVlmScores());
   EXPECT_FALSE(brain->usesFrontierTree());
+}
+
+TEST(GreedyNearestBrain, VizNodesShowsLiveFrontiers_Positive)
+{
+  const std::unique_ptr<ExplorationBrain> brain = createExplorationBrain("greedy_nearest");
+  brain->onEpisodeStart(cv::Point2f(0.f, 0.f));
+  brain->onFrontiersDetected({
+    FrontierCandidate{1u, cv::Point2f(1.f, 0.f)},
+    FrontierCandidate{2u, cv::Point2f(2.f, 0.f)},
+  });
+  const auto viz = brain->vizNodes();
+  ASSERT_EQ(viz.size(), 2u);
+  EXPECT_FALSE(viz[0].visited);
+  EXPECT_FALSE(viz[0].dead);
+  EXPECT_FALSE(viz[1].visited);
+  EXPECT_FALSE(viz[1].dead);
+}
+
+TEST(GreedyNearestBrain, VizNodesMarksVisitedExplored_Positive)
+{
+  const std::unique_ptr<ExplorationBrain> brain = createExplorationBrain("greedy_nearest");
+  brain->onEpisodeStart(cv::Point2f(0.f, 0.f));
+  brain->onFrontiersDetected({
+    FrontierCandidate{1u, cv::Point2f(1.f, 0.f)},
+    FrontierCandidate{2u, cv::Point2f(2.f, 0.f)},
+  });
+  brain->onArrived(1u, cv::Point2f(1.f, 0.f));
+  const auto viz = brain->vizNodes();
+  ASSERT_EQ(viz.size(), 2u);
+  bool saw_visited = false;
+  bool saw_live = false;
+  for (const auto & n : viz) {
+    if (n.id == 1u) {
+      EXPECT_TRUE(n.visited);
+      EXPECT_FALSE(n.dead);
+      saw_visited = true;
+    }
+    if (n.id == 2u) {
+      EXPECT_FALSE(n.visited);
+      EXPECT_FALSE(n.dead);
+      saw_live = true;
+    }
+  }
+  EXPECT_TRUE(saw_visited);
+  EXPECT_TRUE(saw_live);
+}
+
+TEST(GreedyNearestBrain, VizNodesEmptyBeforeDetection_Negative)
+{
+  const std::unique_ptr<ExplorationBrain> brain = createExplorationBrain("greedy_nearest");
+  brain->onEpisodeStart(cv::Point2f(0.f, 0.f));
+  EXPECT_TRUE(brain->vizNodes().empty());
 }
 
 TEST(VlmTreeDfsBrain, WaitsForVlmBeforeSelecting_Positive)
@@ -340,6 +393,26 @@ TEST(VlmFrontierGraphBrain, CompletesWhenNoLive_Negative)
   EXPECT_EQ(brain->selectNextGoal(BrainContext{}).action, BrainAction::kComplete);
 }
 
+TEST(VlmFrontierGraphBrain, VizNodesFromGraph_Positive)
+{
+  const std::unique_ptr<ExplorationBrain> brain = createExplorationBrain("vlm_frontier_graph");
+  brain->onEpisodeStart(cv::Point2f(0.f, 0.f));
+  brain->onFrontiersDetected({
+    FrontierCandidate{1u, cv::Point2f(1.f, 0.f)},
+    FrontierCandidate{2u, cv::Point2f(3.f, 0.f)},
+  });
+  const auto viz = brain->vizNodes();
+  ASSERT_EQ(viz.size(), 2u);
+  EXPECT_FALSE(viz[0].dead);
+}
+
+TEST(VlmFrontierGraphBrain, VizNodesEmptyBeforeDetection_Negative)
+{
+  const std::unique_ptr<ExplorationBrain> brain = createExplorationBrain("vlm_frontier_graph");
+  brain->onEpisodeStart(cv::Point2f(0.f, 0.f));
+  EXPECT_TRUE(brain->vizNodes().empty());
+}
+
 TEST(VlmChoiceDijkstraBrain, EmitsChoiceRecord_Positive)
 {
   const std::unique_ptr<ExplorationBrain> brain = createExplorationBrain("vlm_choice_dijkstra");
@@ -385,6 +458,39 @@ TEST(VlmTreeDfsBrain, SetConfigUpdatesPreferHighest_Positive)
   cfg.dfs_prefer_highest_openness = false;
   brain->setConfig(cfg);
   EXPECT_EQ(brain->selectNextGoal(BrainContext{}).goal_id, ids[1]);
+}
+
+TEST(VlmTreeDfsBrain, TheoreticalBacktrackSetsFlag_Positive)
+{
+  const std::unique_ptr<ExplorationBrain> brain = createExplorationBrain("vlm_tree_dfs");
+  brain->onEpisodeStart(cv::Point2f(0.f, 0.f));
+  const auto ids = brain->onFrontiersDetected({
+    FrontierCandidate{0u, cv::Point2f(1.f, 0.f)},
+    FrontierCandidate{0u, cv::Point2f(2.f, 0.f)},
+  });
+  brain->onVlmScores({{ids[0], 4}, {ids[1], 2}});
+  const auto to_child = brain->selectNextGoal(BrainContext{});
+  ASSERT_EQ(to_child.action, BrainAction::kNavigateTo);
+  EXPECT_FALSE(to_child.theoretical);
+  brain->onArrived(to_child.goal_id, to_child.goal);
+  brain->onFrontiersDetected({});
+  const auto back = brain->selectNextGoal(BrainContext{cv::Point2f(1.f, 0.f)});
+  ASSERT_EQ(back.action, BrainAction::kNavigateTo);
+  EXPECT_TRUE(back.theoretical);
+  EXPECT_NE(back.detail.find("backtrack"), std::string::npos);
+}
+
+TEST(VlmTreeDfsBrain, ChildSelectIsPhysical_Negative)
+{
+  const std::unique_ptr<ExplorationBrain> brain = createExplorationBrain("vlm_tree_dfs");
+  brain->onEpisodeStart(cv::Point2f(0.f, 0.f));
+  const auto ids = brain->onFrontiersDetected({
+    FrontierCandidate{0u, cv::Point2f(1.f, 0.f)},
+  });
+  brain->onVlmScores({{ids[0], 4}});
+  const auto go = brain->selectNextGoal(BrainContext{});
+  ASSERT_EQ(go.action, BrainAction::kNavigateTo);
+  EXPECT_FALSE(go.theoretical);
 }
 
 TEST(ShouldPerformFrontierScan, UnvisitedRequestsScan_Positive)

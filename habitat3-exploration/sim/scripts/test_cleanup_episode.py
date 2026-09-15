@@ -18,6 +18,8 @@ REQUIRED_PATTERNS = [
     "ros2 launch explorer_mission",
     "ros2 run explorer_bridge",
     "static_transform_publisher .* map odom",
+    "experiment_media_recorder.py",
+    "experiment_event_logger.py",
 ]
 
 

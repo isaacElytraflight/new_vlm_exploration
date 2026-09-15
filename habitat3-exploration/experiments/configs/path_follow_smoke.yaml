@@ -1,0 +1,20 @@
+# Short greedy-only smoke to verify DiscreteMove corner following.
+experiment_id: ablation_run
+n_runs_per_cell: 1
+timeout_s: 120
+artifact_root: sim/data/experiments
+
+eval:
+  fov_deg: 360
+  reveal_radius_m: 5.0
+
+algorithms:
+  - id: greedy_nearest
+    brain: greedy_nearest
+
+scenes:
+  - JmbYfDe2QKZ
+
+seeds:
+  mode: sequential
+  start: 0

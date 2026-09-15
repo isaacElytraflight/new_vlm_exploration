@@ -19,6 +19,8 @@ from typing import Iterable, List, Sequence
 # flights on JmbYfDe2QKZ; 0.15 splits floors into separate islands.
 DEFAULT_AGENT_MAX_CLIMB = 0.15
 DEFAULT_MIN_ISLAND_AREA_M2 = 5.0
+# Reject navmesh samples that sit too close to walls / furniture.
+DEFAULT_SPAWN_CLEARANCE_M = 0.4
 
 
 @dataclass(frozen=True)
@@ -26,6 +28,16 @@ class IslandInfo:
     index: int
     mean_y: float
     area: float
+
+
+@dataclass(frozen=True)
+class SpawnSample:
+    """One candidate spawn with navmesh obstacle clearance (meters)."""
+
+    x: float
+    y: float
+    z: float
+    clearance_m: float
 
 
 def select_ground_floor_island(
@@ -68,3 +80,20 @@ def summarize_islands(
             )
         )
     return out
+
+
+def select_spawn_with_clearance(
+    samples: Sequence[SpawnSample],
+    *,
+    min_clearance_m: float = DEFAULT_SPAWN_CLEARANCE_M,
+) -> SpawnSample:
+    """Pick the first sample with enough clearance; else the max-clearance one.
+
+    Empty input raises ValueError. Used by Habitat spawn after pathfinder.seed.
+    """
+    if not samples:
+        raise ValueError("no spawn samples")
+    for sample in samples:
+        if float(sample.clearance_m) >= float(min_clearance_m):
+            return sample
+    return max(samples, key=lambda s: (float(s.clearance_m), -abs(s.x), -abs(s.z)))

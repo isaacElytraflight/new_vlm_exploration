@@ -14,17 +14,20 @@ Contract reference: [habitat3-exploration/ros_workspace/design_doc.md](habitat3-
 
 ---
 
-## Current baseline (as of 2026-09-08)
+## Current baseline (as of 2026-09-15)
 
 ```text
 /depth_data + /camera_info + /odom
         → known_pose_pc_mapper (C++, default)  →  /grid_map
         → explore_node (thin orchestrator)
               → ExplorationBrain plugin (brain_id)
-              → detect frontiers → brain → optional VLM → selectNextGoal
+              → detect frontiers (inset into free) → brain → optional VLM → selectNextGoal
               → 360° scan only on first visit to a frontier (visited ≠ dead)
         → Nav2 NavigateToPose  →  /cmd_vel  →  DiscreteMove (Habitat)
-        → on nav fail: thrash BACK/FWD (×5) → zero-inflation retry → else mark dead
+        → on NEW-goal nav fail: nav_fail_policy
+              inaccessible (prior OK + start clear + definitive NO_VALID_PATH/…) → mark dead
+              else stuck → thrash → zero-inflation return → retry once;
+              still wedged → termination_reason=stuck (do not burn remaining tree)
 ```
 
 | Piece | Location | Notes |
@@ -33,12 +36,23 @@ Contract reference: [habitat3-exploration/ros_workspace/design_doc.md](habitat3-
 | Exploration | `explore_node` + `ExplorationBrain` | Pluggable brains via `brain_id`; detect/Nav2/recovery stay in node |
 | Brains | `exploration_brain.hpp/.cpp` | `vlm_tree_dfs`, `greedy_nearest`, `vlm_frontier_graph`, `vlm_choice_dijkstra` |
 | Visited vs dead | Tree + graph brains | `visited` = arrived (one-time 360°); `dead` / `fully_explored` = abandoned |
-| Motion | `cmd_vel_to_discrete` | Drive vs turn via `|ang|/|lin|` ratio (default 1.0) |
-| Nav2 | `nav2_params.yaml` | No-recovery BT; `allow_unknown: true`; costmap inflation **0.15 m** (0 briefly for last-ditch) |
+| Motion | `cmd_vel_to_discrete` | `turn_over_drive_ratio` default **0.5** + `drive_max_angular` **0.12** (corner arcs TURN, not 0.25 m FORWARD) |
+| Nav2 | `nav2_params.yaml` | No-recovery BT; `allow_unknown: true`; costmap inflation **0.22 m** (≥ `robot_radius` 0.18) |
+| Nav fail | `nav_fail_policy` | Inaccessible vs stuck; honest `termination_reason` in status / metrics |
 | Ablations | `experiments/` + Elytra | Brain checkboxes; Fresh → `ablation_run_<ts>/`; cells `{algo}_seedN/` + `run_info.json` |
 | Event JSONL | `experiment_event_logger.py` | status, tree, vlm/scores, **brain/decision**, **brain/graph_edges**, **vlm/choice** |
 
-**Known v1 debt (Goal C follow-ups):** graph edge costs are **Euclidean kNN**, not Nav2 path cost; choice brain logs prompt/response but selection is **score-argmax** among Dijkstra candidates (not a true multi-image VLM choice query yet).
+### Known serious issues (not resolved)
+
+Ablation metrics remain **unreliable for claiming navigation quality**. Treat high coverage as suspicious until path follow + recovery are re-verified end-to-end.
+
+1. **DiscreteMove path follow still imperfect.** Nav2 plans around corners; RPP→`cmd_vel`→0.25 m / 10° quantization still wedges the robot into walls. Ratio/heading gate (0.5 / 0.12) helps mild arcs; residual plow/thrash remains in smokes (`termination_reason=stuck` ~50–77% cov).
+2. **“Advanced” recovery can look worse than naive mark-dead.** Ending `stuck` after one failed return avoids mass-blacklist lies, but also stops episodes that older thrash-forever runs sometimes recovered into higher coverage. Persistence ≠ correctness.
+3. **Fake early “success” hazard.** Prior classifier bugs (prior still plannable while wedged; soft-fail score 0; apply-profile abort) produced `success` / `no live frontiers` in seconds at ~52% with almost no visits. Prefer `termination_reason`, visited counts, and trajectory media over status alone.
+4. **Costmap / start clearance sensitivity.** Inflation vs `robot_radius`, frontier goals on free↔unknown edges, and Habitat `collided=True` during DiscreteMove interact; wedged starts make every NEW goal look like `NO_VALID_PATH`.
+5. **Goal C debt unchanged:** graph edges are Euclidean kNN, not Nav2 path cost; choice brain is score-argmax stand-in, not true multi-image VLM choice.
+
+**Open priority:** fix path following until corner follow is visibly sane, *then* revisit recovery aggressiveness — do not pile more blacklist heuristics on a wedged robot.
 
 ---
 

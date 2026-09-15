@@ -10,7 +10,12 @@ from __future__ import annotations
 
 import pytest
 
-from floor_constraint import IslandInfo, select_ground_floor_island
+from floor_constraint import (
+    IslandInfo,
+    SpawnSample,
+    select_ground_floor_island,
+    select_spawn_with_clearance,
+)
 
 
 def test_harness_positive_control():
@@ -20,6 +25,34 @@ def test_harness_positive_control():
 def test_harness_negative_control():
     with pytest.raises(AssertionError):
         assert 1 == 2
+
+
+def test_select_spawn_picks_first_with_clearance_positive():
+    samples = [
+        SpawnSample(0.0, 0.0, 0.0, 0.1),
+        SpawnSample(1.0, 0.0, 2.0, 0.5),
+        SpawnSample(9.0, 0.0, 9.0, 1.0),
+    ]
+    picked = select_spawn_with_clearance(samples, min_clearance_m=0.4)
+    assert picked.x == 1.0
+    assert picked.z == 2.0
+
+
+def test_select_spawn_falls_back_to_best_clearance_negative():
+    """When nothing meets the threshold, still return the roomiest sample."""
+    samples = [
+        SpawnSample(0.0, 0.0, 0.0, 0.05),
+        SpawnSample(1.0, 0.0, 1.0, 0.25),
+        SpawnSample(2.0, 0.0, 2.0, 0.15),
+    ]
+    picked = select_spawn_with_clearance(samples, min_clearance_m=0.4)
+    assert picked.clearance_m == 0.25
+    assert picked.x == 1.0
+
+
+def test_select_spawn_empty_raises_negative():
+    with pytest.raises(ValueError, match="no spawn samples"):
+        select_spawn_with_clearance([], min_clearance_m=0.4)
 
 
 def test_selects_lowest_large_island_positive():

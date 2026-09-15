@@ -130,16 +130,32 @@ def _costmap_inflation(name: str) -> float:
     )
 
 
-def test_inflation_radius_15cm_positive():
-    """Tighter inflation so narrow free corridors remain plannable."""
-    assert _costmap_inflation("local_costmap") == pytest.approx(0.15)
-    assert _costmap_inflation("global_costmap") == pytest.approx(0.15)
+def test_inflation_radius_covers_robot_inscribed_positive():
+    """Inflation must be >= robot_radius or Nav2 warns and starts go lethal."""
+    with PARAMS.open(encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    for name in ("local_costmap", "global_costmap"):
+        params = data[name][name]["ros__parameters"]
+        robot_r = float(params["robot_radius"])
+        infl = float(params["inflation_layer"]["inflation_radius"])
+        assert infl + 1e-9 >= robot_r, f"{name}: inflation {infl} < robot_radius {robot_r}"
+
+
+def test_inflation_radius_22cm_positive():
+    """0.22 m: above inscribed (~0.186) but below the 0.30 corridor-blocker."""
+    assert _costmap_inflation("local_costmap") == pytest.approx(0.22)
+    assert _costmap_inflation("global_costmap") == pytest.approx(0.22)
 
 
 def test_inflation_radius_not_30cm_negative():
     """Regression: 0.30 m inflation blocked return-home plans through tight free space."""
     assert _costmap_inflation("local_costmap") < 0.30
     assert _costmap_inflation("global_costmap") < 0.30
+
+
+def test_inflation_radius_not_15cm_when_robot_18cm_negative():
+    """Regression: 0.15 < 0.18 robot_radius → NO_VALID_PATH from near-wall starts."""
+    assert _costmap_inflation("global_costmap") > 0.15
 
 
 def _bt_navigator_params():

@@ -20,12 +20,30 @@ from explorer_msgs.msg import FrontierTree
 
 NOT_RATED = 255
 
+# OpenCV BGR colors for frontier dots.
+COLOR_UNVISITED_ALIVE = (0, 255, 0)      # green
+COLOR_VISITED_ALIVE = (0, 255, 255)      # yellow
+COLOR_VISITED_DEAD = (255, 0, 0)         # blue
+COLOR_UNVISITED_DEAD = (128, 128, 128)   # grey
+COLOR_CURRENT_RING = (0, 165, 255)       # orange accent for current
+
 
 def openness_label_text(score: int) -> str | None:
     """Return 0–5 label for a rated frontier; None if not yet rated."""
     if score == NOT_RATED:
         return None
     return str(int(score))
+
+
+def frontier_dot_bgr(*, visited: bool, dead: bool) -> tuple[int, int, int]:
+    """Map visited/dead flags to overlay colors."""
+    if dead and visited:
+        return COLOR_VISITED_DEAD
+    if dead and not visited:
+        return COLOR_UNVISITED_DEAD
+    if visited and not dead:
+        return COLOR_VISITED_ALIVE
+    return COLOR_UNVISITED_ALIVE
 
 
 def occupancy_to_bgr(grid: np.ndarray) -> np.ndarray:
@@ -152,9 +170,6 @@ class MapRenderNode(Node):
         self,
         robot_color=(0, 0, 255),
         arrow_color=(0, 165, 255),
-        node_color=(0, 255, 0),
-        current_node_color=(255, 128, 0),
-        explored_color=(128, 128, 128),
         trajectory_color=(200, 0, 0),
         label_color=(255, 0, 255),
         global_plan_color=(255, 165, 0),
@@ -198,14 +213,13 @@ class MapRenderNode(Node):
                 cv2.line(color, p0, p1, tree_edge_color, 1, cv2.LINE_AA)
             for node in self.tree_msg.nodes:
                 px, py = world_to_flipped_pixel(node.position.x, node.position.y)
-                if node.fully_explored:
-                    dot_color = explored_color
-                elif node.id == current_id:
-                    dot_color = current_node_color
-                else:
-                    dot_color = node_color
+                visited = bool(getattr(node, "visited", False))
+                dead = bool(node.fully_explored)
+                dot_color = frontier_dot_bgr(visited=visited, dead=dead)
                 radius = current_node_radius if node.id == current_id else node_radius
                 cv2.circle(color, (px, py), radius, dot_color, -1)
+                if node.id == current_id:
+                    cv2.circle(color, (px, py), radius + 2, COLOR_CURRENT_RING, 1)
                 label = openness_label_text(int(node.openness_score))
                 if label is not None:
                     tx, ty = px - 4, py - radius - 4

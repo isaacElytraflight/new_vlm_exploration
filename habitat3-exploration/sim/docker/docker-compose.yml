@@ -61,4 +61,7 @@ services:
       - ../../ros_workspace/src:/opt/explorer_workspace/ros_workspace/src
       - ../../missions:/workspace/missions # elytra-bridge mission saves
     tty: true
+    # Reap orphaned children (entrypoint ends in `tail -f /dev/null` as keep-alive;
+    # without init, killed ROS nodes become zombies under PID 1).
+    init: true
     restart: unless-stopped

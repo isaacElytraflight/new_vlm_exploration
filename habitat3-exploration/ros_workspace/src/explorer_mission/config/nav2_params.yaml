@@ -166,7 +166,9 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.15
+        # Must be >= inscribed radius from robot_radius (0.18 → ~0.186). 0.15
+        # caused Nav2 warnings and NO_VALID_PATH from near-wall starts.
+        inflation_radius: 0.22
 
 local_costmap:
   local_costmap:
@@ -200,7 +202,8 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.15
+        # Keep in sync with global_costmap (must be >= robot inscribed radius).
+        inflation_radius: 0.22
 
 collision_monitor:
   ros__parameters:

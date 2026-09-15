@@ -6,6 +6,179 @@ Add a new dated section at the top when you work on this repo.
 
 ---
 
+## 2026-09-15 — Checkpoint commit (serious nav issues remain)
+
+Shipped working-tree nav-fail / path-follow / ablation-ops fixes to `main`. **Not claiming solved:** DiscreteMove corner follow still imperfect; advanced recovery ending `stuck` often underperforms older thrash-forever coverage; fake early `success` / mass-blacklist remains a metric hazard. Documented in `FUTURE_GOALS.md` and `design_doc.md`.
+
+---
+
+## 2026-09-09 — DiscreteMove path follow (corners), not recovery
+
+**Symptom:** Nav2 blue `/plan` arcs around corners; Habitat still “sharp left into wall.” Recovery/blacklist looked crazy but was downstream.
+
+**Root cause:** `cmd_vel_to_intent` with `turn_over_drive_ratio=1.0` chose **FORWARD** on mild RPP arcs (`|ang|/|lin|` ~0.5–0.9). A 0.25 m straight step with residual yaw hits the wall.
+
+**Fix (bridge only):**
+1. Default `turn_over_drive_ratio` **1.0 → 0.5**
+2. New `drive_max_angular=0.12`: if `|angular_z| >=` gate while driving → **TURN** (Habitat only walks when roughly aligned)
+3. Keep turn-flip hysteresis unchanged
+
+**Verify:** `pytest` `test_cmd_vel_to_discrete.py` 17 passed. Live node params `0.5` / `0.12`. Short greedy smoke `path_follow_smoke.yaml` → `ablation_run_20260909_021612` completed (~22 m / 53 % cov / still `termination_reason=stuck` — recovery revisit separate).
+
+**Not in this pass:** thrash/blacklist/inflation heuristics.
+
+---
+
+## 2026-09-09 — Ablation 013854: apply Node not found + wedged thrash-burn
+
+**seed0:** `error` — `apply_exploration_profile failed: Node not found`. Soft-fail required `ros2 param describe /explore` success; DDS blip → hard abort despite brain already at launch.
+
+**seed1:** “completed” ~144 s / 63 % cov but only 3 visited; from ~08:42 every goal → unstick+backtrack (~6 s) then mark dead until empty. Wedged start → stuck path → still marked dead after recovery.
+
+**Fix:** Always soft-fail apply when brain set at launch. After stuck recovery, if start still low-clearance → `termination_reason=stuck` (no further blacklist); mark dead only if start is clear.
+
+---
+
+## 2026-09-09 — Wall ram → confuse → early give-up / mass blacklist
+
+**Pattern:** Drive into wall → DiscreteMove kept succeeding with `collided=True` → start wedged → every NEW goal `NO_VALID_PATH` while prior “OK” via nearPose → inaccessible mass-blacklist; or thrash/abandon. Soft-fail to score 0 also killed frontiers. Goals sat on free↔unknown edge.
+
+**Fixes**
+1. Bridge: abort DiscreteMove on Habitat `collided` (even if step success).
+2. Inaccessible requires **start clearance OK**; wedged start → stuck recovery, not blacklist-all.
+3. Soft-fail missing VLM views → score **1** (not 0).
+4. Inset frontier goals **0.35 m** into known free before Nav2.
+
+**Tests:** bridge collide abort; nav_fail start clearance; frontier inset.
+
+---
+
+## 2026-09-09 — Senseless thrash on every frontier
+
+**Symptoms:** Robot thrashing back/forth repeatedly; logs show Wall unstick 1–5 for each NEW goal while planner fails `from (-2.73, 3.30) to <many goals>` with NO_VALID_PATH in ~30 ms.
+
+**Root cause:** `nav_attempt_substantive` gate forced near-instant definitive fails into **stuck** (thrash) instead of **inaccessible**. Thrash is for a stuck robot, not for “this frontier has no plan while prior is fine.” Step scale ×3 made it worse.
+
+**Fix:** Inaccessible again = prior OK + definitive NEW unplannable (no substantive-nav requirement). Thrash scale back to ×1.
+
+---
+
+## 2026-09-09 — Nav2 “good path” but NO_VALID_PATH (inflation &lt; robot)
+
+**Symptoms:** NavigateToPose aborts in ~30 ms with `nav_error_code=208`. Planner: `GridBased failed to plan from (1.95, 3.30) to …: Failed to create plan with tolerance of: 1.0` for **many different goals from the same start**. Costmap warns: inflation 0.15 &lt; inscribed ~0.186 (`robot_radius` 0.18).
+
+**Root cause:** Not controller / “invisible wall” in the occupancy view. NavFn cannot leave a start that is lethal/inflated relative to `robot_radius`. Occupancy free corridors look open on the map render, but the costmap footprint+inflation made starts (esp. after thrash near walls) unplannable. Config had intentionally tight inflation 0.15 after 0.30 blocked corridors, but left `robot_radius` at 0.18.
+
+**Fix:** `inflation_radius` 0.15 → **0.22** (global+local); explore restore default matches. Tests: inflation ≥ robot_radius; reject 0.15-with-0.18 regression. **Needs episode restart** to reload Nav2 YAML.
+
+---
+
+## 2026-09-09 — Thrash skipped / invisible on near-instant Nav2 abort
+
+**Symptoms:** User: robot not doing back-and-forth recovery. Campaign `010114`: one short `backtracking` then same-second flood of navigates → complete. Logs showed Wall unstick 1–5 in ~0.5s (1–3 DiscreteMove steps), then later frontiers marked without thrash.
+
+**Root cause:** Near-instant Navigate ABORT + ComputePath `NO_VALID_PATH` still counted as inaccessible (no thrash). Thrash step counts were too small to see.
+
+**Fix:** Inaccessible also requires substantive nav attempt (≥1.5s). Near-instant abort → stuck → thrash. Thrash steps ×3 (3/3/6/6/9). Publish phase `unsticking` during thrash.
+
+**Tests:** `test_nav_fail_policy`, `test_wall_unstick` updated.
+
+---
+
+## 2026-09-09 — Inaccessible only on definitive ComputePath codes
+
+**Symptoms:** After requiring NEW-goal plan fail, `ablation_run_20260909_004651` still mass-marked frontiers dead in &lt;1s. Logs: `NavigateToPose failed with code 6` (ABORTED) then `NEW frontier has no theoretical path and prior N reachable — mark inaccessible`.
+
+**Root cause:** ComputePath was returning failure without a trusted unreachable code (or code 0 / TF / timeout). Classifier treated any `!new_goal_plan_ok` as inaccessible while prior was reachable → same flood.
+
+**Fix:** `isDefinitiveGoalUnreachable` only for Nav2 codes GOAL_OUTSIDE_MAP(204), GOAL_OCCUPIED(206), NO_VALID_PATH(208). Inaccessible requires that flag. Otherwise stuck recovery. Explore logs `nav_code` / `new_plan_code` / `definitive` on every NEW fail.
+
+**Tests:** `test_nav_fail_policy` green after rebuild.
+
+---
+
+## 2026-09-09 — Inaccessible needs failed NEW plan (+ zombie init)
+
+**Symptoms:** Ablation `ablation_run_20260909_002650` finished `failed=0` but episodes ended in seconds (~52–55% coverage, &lt;1 m travel on seed1) with `no live frontiers` / `termination_reason=success`. Events showed dozens of NEW goals marked dead in one second while `visited_ids` stayed `[12,4]`.
+
+**Root cause:** `classifyNewGoalNavFailure` treated “prior still plannable” as inaccessible. After a fast NavigateToPose fail the robot is still at the prior scan pose, so `theoreticalPlanTo(prior)` is always true → every frontier burned dead. Also: container PID 1 was `tail -f /dev/null` (no reaper) → defunct `explore_node` + leftover ablation collectors.
+
+**Fix**
+1. Classifier now requires `prior_ok && !new_goal_plan_ok` for inaccessible; if NEW still has a theoretical path → stuck recovery instead.
+2. `explore_node` calls `theoreticalPlanTo(goal_pos)` before classifying.
+3. `docker-compose.yml`: `init: true` so tini reaps orphans; cleanup_episode also kills experiment collectors.
+
+**Tests:** `test_nav_fail_policy` (8) green after rebuild.
+
+**Note:** Existing zombie clears only on container recreate (`compose up -d --force-recreate` or down/up).
+
+---
+
+## 2026-09-09 — Nav-fail recovery redesign + map colors + termination_reason
+
+**Intent (confirmed):** Distinguish inaccessible NEW frontiers from stuck robot; theoretical DFS backtrack; log how runs end; clearer map colors.
+
+**Behavior**
+1. NEW goal Nav2 fail → theoretical `ComputePathToPose` to previous (last scan pose).
+2. Prior reachable **and NEW unplannable** → mark NEW dead (inaccessible), continue.
+3. Prior unreachable (or NEW still plannable) → thrash → deflate + physical return → restore inflation → one NEW retry; retry fail → mark dead; return fail → end episode `complete` with `termination_reason=stuck` (ablation cell still completed).
+4. DFS parent hops: `BrainDecision.theoretical=true` (no physical nav).
+5. Map dots: green unvisited-alive / yellow visited-alive / blue visited-dead / grey unvisited-dead.
+6. `ExplorationStatus.termination_reason` + `run_metrics.json` field.
+
+**Tests:** `test_nav_fail_policy`, brain theoretical/viz, maprender colors; explorer_mission colcon green.
+
+---
+
+## 2026-09-08 — Elytra: runs-per-brain input + Fresh default
+
+**Change:** Ablation UI number field “Runs per brain” (default **2**, range 1–100) → `--n-runs-per-cell`. Campaign mode default is **Fresh** (was Resume). Restart Elytra `npm run dev` to pick up frontend/backend.
+
+---
+
+## 2026-09-08 — Spawn clearance, greedy green dots, ablation apply soft-fail
+
+**Symptoms**
+1. Greedy Nav Plan missing green frontier dots (VLM tree DFS still showed them).
+2. Ablation `seed0`/`seed1` spawned at the same pose.
+3. Smoke campaign: greedy OK; all VLM cells died on `apply_exploration_profile` (`/explore` param timeout / “start episode first”).
+
+**Root causes**
+1. `publishTree()` returned early when `frontierTree()` was null (greedy/graph).
+2. Spawn used `np.random.seed` but Habitat samples via `pathfinder.seed` / C `rand`.
+3. Brain is launch-only (`selected_brain.id`); `ros2 param set brain_id` does not switch brains. Apply after cell teardown raced and aborted the run.
+
+**Fixes**
+- `floor_constraint.select_spawn_with_clearance` + `habitat_engine`: `pathfinder.seed`, resample until clearance ≥ 0.4 m (fallback best).
+- Brain `vizNodes()` + synthetic `FrontierTree` publish for non-tree brains.
+- Orchestrator: wait until `brain_id` matches; retry apply; soft-fail if `/explore` still up; 5 s post-stop settle.
+
+**Tests:** `test_floor_constraint` (11), `test_brain_wiring` (6), `*Viz*` gtests (5), full `explorer_mission` colcon tests green.
+
+**Not done:** Re-run full 6-cell smoke; confirm spawn coords differ in Habitat logs.
+
+---
+
+## 2026-09-08 — Fresh ablation failed immediately on launch
+
+**Symptom:** UI `Failed: Launching fresh campaign (ablation_run_<ts>)…`
+
+**Cause:** Fresh CLI still tried to `rename(ablation_run → new_id)`; legacy folder was file-locked → `PermissionError`, child exited before writing progress.
+
+**Fix:** Migrate bare `ablation_run/` only on Resume; Fresh ignores it. Permission errors on migrate are warnings, not fatal. Retry Fresh (Python fix is live; restart Elytra if you want the clearer failure detail).
+
+---
+
+## 2026-09-08 — Bare `ablation_run/` folder naming bug
+
+**Symptom:** Resume campaign created `sim/data/experiments/ablation_run/` (no timestamp).
+
+**Cause:** `smoke.yaml` placeholder `experiment_id: ablation_run` was used as-is on Resume. Elytra only passed `--experiment-id` when progress already had `ablation_run_<ts>`, so Python never minted a stamp.
+
+**Fix:** Mint timestamp whenever id is bare `ablation_run`; Resume migrates existing `ablation_run/` → `ablation_run_<ts>/` before continuing. Restart Elytra backend to pick up runner changes.
+
+---
+
 ## 2026-09-08 — Goal C polish: brains UI, visited≠dead, zero-inflation, short package names
 
 **Intent:** Make ablations operable (pick brains), stop redundant 360° scans, escape corner traps after thrash, and keep artifact folders readable.

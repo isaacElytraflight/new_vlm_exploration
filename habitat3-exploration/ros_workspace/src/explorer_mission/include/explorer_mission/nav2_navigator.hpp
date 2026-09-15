@@ -8,6 +8,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <nav2_msgs/action/navigate_to_pose.hpp>
+#include <nav2_msgs/action/compute_path_to_pose.hpp>
 
 #include "explorer_mission/stuck_progress.hpp"
 
@@ -34,6 +35,12 @@ public:
 
   void cancel();
 
+  /// Theoretical reachability via ComputePathToPose (no controller execution).
+  bool computePathExists(
+    double x, double y, double yaw_rad,
+    const std::string & map_frame,
+    double timeout_s = 15.0);
+
   void noteProgress(double x, double y, double stuck_distance_m, double stuck_timeout_s);
   bool isStuck(double stuck_timeout_s) const;
   void resetProgress();
@@ -45,6 +52,7 @@ public:
 private:
   rclcpp::Node * node_{nullptr};
   rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr client_;
+  rclcpp_action::Client<nav2_msgs::action::ComputePathToPose>::SharedPtr plan_client_;
   rclcpp_action::ClientGoalHandle<nav2_msgs::action::NavigateToPose>::SharedPtr active_goal_handle_;
   std::string last_error_;
   uint16_t last_error_code_{0};

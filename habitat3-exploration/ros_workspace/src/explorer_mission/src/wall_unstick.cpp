@@ -118,7 +118,7 @@ UnstickThrashMotion unstickThrashMotion(int attempt_index)
   // Even attempts: reverse (helps when facing into occlusion).
   // Odd attempts: forward (helps when back is against the wall).
   motion.direction = (idx % 2 == 0) ? kUnstickBackward : kUnstickForward;
-  motion.steps = (idx / 2) + 1;
+  motion.steps = kUnstickStepScale * ((idx / 2) + 1);
   return motion;
 }
 

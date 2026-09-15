@@ -24,6 +24,10 @@ constexpr int kUnstickTurnRight = 3;
 /// Default outer unstick budget before marking the destination frontier dead.
 constexpr int kDefaultMaxUnstickAttempts = 5;
 
+/// Scale DiscreteMove step counts for Habitat (1 step ≈ 0.25 m). Keep modest —
+/// thrash is only for stuck-robot recovery, not every unplannable frontier.
+constexpr int kUnstickStepScale = 1;
+
 struct UnstickDecision
 {
   bool attempt_unstick{false};

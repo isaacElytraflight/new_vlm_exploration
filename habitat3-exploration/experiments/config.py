@@ -162,6 +162,52 @@ def make_ablation_experiment_id(stamp: str | None = None) -> str:
     return f"ablation_run_{raw}"
 
 
+def is_timestamped_ablation_id(experiment_id: str) -> bool:
+    s = str(experiment_id or "").strip()
+    return s.startswith("ablation_run_") and len(s) > len("ablation_run_")
+
+
+def migrate_bare_ablation_campaign(artifact_root: Path | str, new_experiment_id: str) -> bool:
+    """Rename legacy ``ablation_run/`` → ``new_experiment_id/`` if present.
+
+    Returns True when a rename happened. Raises OSError/PermissionError if the
+    rename cannot complete (caller should treat as non-fatal on Fresh).
+    """
+    import json
+
+    root = Path(artifact_root)
+    bare = root / "ablation_run"
+    dest = root / new_experiment_id
+    if not is_timestamped_ablation_id(new_experiment_id):
+        return False
+    if not bare.is_dir():
+        return False
+    if dest.exists():
+        raise FileExistsError(
+            f"Cannot migrate bare ablation_run/: destination exists ({new_experiment_id})"
+        )
+    bare.rename(dest)
+
+    def _rewrite(path: Path) -> None:
+        if not path.is_file():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if isinstance(data, dict):
+            data["experiment_id"] = new_experiment_id
+            path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    _rewrite(dest / "campaign_info.json")
+    _rewrite(dest / "experiment_state.json")
+    for child in dest.iterdir():
+        if child.is_dir():
+            _rewrite(child / "run_info.json")
+            _rewrite(child / "manifest.json")
+    return True
+
+
 def frozen_config_json(spec: RunSpec) -> str:
     payload = {
         "experiment_id": spec.experiment_id,

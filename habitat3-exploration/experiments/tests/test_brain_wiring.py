@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from experiments.apply_profile_policy import apply_profile_failure_is_fatal
+
 SCRIPT = Path(__file__).resolve().parents[2] / "sim" / "scripts" / "apply_exploration_profile.sh"
 START_SIM = Path(__file__).resolve().parents[2] / "sim" / "scripts" / "start_sim.sh"
 
@@ -25,7 +27,7 @@ def test_apply_profile_sets_brain_id_positive():
 
 def test_apply_profile_rejects_unknown_negative():
     text = SCRIPT.read_text(encoding="utf-8")
-    assert 'Unknown profile' in text
+    assert "Unknown profile" in text
 
 
 def test_start_sim_passes_brain_id_positive():
@@ -33,3 +35,12 @@ def test_start_sim_passes_brain_id_positive():
     text = START_SIM.read_text(encoding="utf-8")
     assert "selected_brain.id" in text
     assert "brain_id:=" in text
+
+
+def test_apply_profile_soft_fail_when_brain_at_launch_positive():
+    """Ablation launches with EXPLORER_BRAIN_ID — apply failure must not kill the cell."""
+    assert apply_profile_failure_is_fatal(brain_set_at_launch=True) is False
+
+
+def test_apply_profile_fatal_when_brain_not_at_launch_negative():
+    assert apply_profile_failure_is_fatal(brain_set_at_launch=False) is True

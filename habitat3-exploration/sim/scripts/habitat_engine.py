@@ -33,8 +33,11 @@ from explored_map import compute_revealed_grid
 from floor_constraint import (
     DEFAULT_AGENT_MAX_CLIMB,
     DEFAULT_MIN_ISLAND_AREA_M2,
+    DEFAULT_SPAWN_CLEARANCE_M,
     IslandInfo,
+    SpawnSample,
     select_ground_floor_island,
+    select_spawn_with_clearance,
     summarize_islands,
 )
 
@@ -47,6 +50,10 @@ AGENT_MAX_CLIMB = float(os.environ.get("HABITAT_AGENT_MAX_CLIMB", str(DEFAULT_AG
 GROUND_MIN_ISLAND_AREA = float(
     os.environ.get("HABITAT_GROUND_MIN_ISLAND_AREA", str(DEFAULT_MIN_ISLAND_AREA_M2))
 )
+SPAWN_CLEARANCE_M = float(
+    os.environ.get("HABITAT_SPAWN_CLEARANCE_M", str(DEFAULT_SPAWN_CLEARANCE_M))
+)
+SPAWN_SAMPLE_TRIES = max(1, int(os.environ.get("HABITAT_SPAWN_SAMPLE_TRIES", "40")))
 LOCK_GROUND_FLOOR = os.environ.get("HABITAT_LOCK_GROUND_FLOOR", "1").strip().lower() not in {
     "0",
     "false",
@@ -156,10 +163,11 @@ def _sample_island_infos(pathfinder, *, samples: int = 4000) -> list[IslandInfo]
 def apply_ground_floor_constraints(sim: habitat_sim.Simulator, *, spawn_seed: Optional[int] = None) -> int:
     """Rebake navmesh to disconnect stairs and spawn on the ground-floor island.
 
+    Uses pathfinder.seed (not numpy) so HABITAT_SPAWN_SEED diversifies starts.
+    Resamples until obstacle clearance >= HABITAT_SPAWN_CLEARANCE_M (fallback: best).
+
     Returns the selected island index.
     """
-    if spawn_seed is not None:
-        np.random.seed(int(spawn_seed))
     pathfinder = sim.pathfinder
     if not pathfinder.is_loaded:
         raise RuntimeError("pathfinder not loaded")
@@ -172,13 +180,33 @@ def apply_ground_floor_constraints(sim: habitat_sim.Simulator, *, spawn_seed: Op
             f"recompute_navmesh failed (agent_max_climb={AGENT_MAX_CLIMB})"
         )
 
+    if spawn_seed is not None:
+        pathfinder.seed(int(spawn_seed))
+
     islands = _sample_island_infos(pathfinder)
     island = select_ground_floor_island(islands, min_area=GROUND_MIN_ISLAND_AREA)
-    spawn = pathfinder.get_random_navigable_point(
-        max_tries=200, island_index=island
-    )
-    if not np.isfinite(spawn).all():
+
+    samples: list[SpawnSample] = []
+    for _ in range(SPAWN_SAMPLE_TRIES):
+        point = pathfinder.get_random_navigable_point(
+            max_tries=200, island_index=island
+        )
+        if not np.isfinite(point).all():
+            continue
+        clearance = float(pathfinder.distance_to_closest_obstacle(point))
+        samples.append(
+            SpawnSample(
+                x=float(point[0]),
+                y=float(point[1]),
+                z=float(point[2]),
+                clearance_m=clearance,
+            )
+        )
+    if not samples:
         raise RuntimeError(f"failed to sample spawn on ground island {island}")
+
+    picked = select_spawn_with_clearance(samples, min_clearance_m=SPAWN_CLEARANCE_M)
+    spawn = np.array([picked.x, picked.y, picked.z], dtype=np.float32)
 
     agent = sim.get_agent(0)
     state = agent.get_state()
@@ -186,7 +214,9 @@ def apply_ground_floor_constraints(sim: habitat_sim.Simulator, *, spawn_seed: Op
     agent.set_state(state)
     print(
         f"Ground-floor lock: island={island} climb={AGENT_MAX_CLIMB} "
-        f"spawn=({float(spawn[0]):.2f}, {float(spawn[1]):.2f}, {float(spawn[2]):.2f})"
+        f"seed={spawn_seed} clearance={picked.clearance_m:.2f}m "
+        f"(min={SPAWN_CLEARANCE_M}) "
+        f"spawn=({picked.x:.2f}, {picked.y:.2f}, {picked.z:.2f})"
     )
     return island
 

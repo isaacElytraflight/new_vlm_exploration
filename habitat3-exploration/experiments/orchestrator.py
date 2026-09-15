@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+from experiments.apply_profile_policy import apply_profile_failure_is_fatal
 from experiments.config import (
     ExperimentConfig,
     RunSpec,
@@ -653,42 +654,78 @@ class ExperimentOrchestrator:
         resumed: bool = False,
         completed_prior: int = 0,
     ) -> None:
+        expected_brain = str(spec.profile.brain_id)
         deadline = time.time() + timeout_s
         while time.time() < deadline:
             if self.progress.cancel_requested():
                 raise RuntimeError("ablation cancelled while waiting for explore node")
-            proc = self._docker(
+            ready = self._docker(
                 "source /opt/ros/jazzy/setup.bash && "
                 "source /opt/explorer_workspace/ros_workspace/install/setup.bash && "
                 "ros2 param describe /explore dfs_prefer_highest_openness",
                 check=False,
             )
-            if proc.returncode == 0:
-                return
-            self._report(
-                index=index,
-                total=total,
-                spec=spec,
-                step="wait_explore_node",
-                detail="still waiting for /explore",
-                resumed=resumed,
-                completed_prior=completed_prior,
-            )
+            if ready.returncode == 0:
+                brain_proc = self._docker(
+                    "source /opt/ros/jazzy/setup.bash && "
+                    "source /opt/explorer_workspace/ros_workspace/install/setup.bash && "
+                    "ros2 param get /explore brain_id",
+                    check=False,
+                )
+                out = (brain_proc.stdout or "") + (brain_proc.stderr or "")
+                if brain_proc.returncode == 0 and expected_brain in out:
+                    return
+                self._report(
+                    index=index,
+                    total=total,
+                    spec=spec,
+                    step="wait_explore_node",
+                    detail=f"/explore up; waiting brain_id={expected_brain}",
+                    resumed=resumed,
+                    completed_prior=completed_prior,
+                )
+            else:
+                self._report(
+                    index=index,
+                    total=total,
+                    spec=spec,
+                    step="wait_explore_node",
+                    detail="still waiting for /explore",
+                    resumed=resumed,
+                    completed_prior=completed_prior,
+                )
             time.sleep(2.0)
         raise TimeoutError("explore node did not become ready within timeout")
 
     def _apply_profile(self, spec: RunSpec) -> None:
-        profile = spec.profile.id
-        proc = self._docker(
-            "source /opt/ros/jazzy/setup.bash && "
-            "source /opt/explorer_workspace/ros_workspace/install/setup.bash && "
-            f"bash /workspace/scripts/apply_exploration_profile.sh {shlex.quote(profile)}",
-            check=False,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"apply_exploration_profile failed: {proc.stderr.strip() or proc.stdout}"
+        """Best-effort DFS knobs. Brain is already set at launch — do not abort cell."""
+        last_err = ""
+        for attempt in range(1, 4):
+            proc = self._docker(
+                "source /opt/ros/jazzy/setup.bash && "
+                "source /opt/explorer_workspace/ros_workspace/install/setup.bash && "
+                f"bash /workspace/scripts/apply_exploration_profile.sh {shlex.quote(spec.profile.id)}",
+                check=False,
             )
+            if proc.returncode == 0:
+                return
+            last_err = (proc.stderr or proc.stdout or "").strip()
+            time.sleep(2.0 * attempt)
+        # Brain already correct at launch — never abort the cell on apply failure
+        # (including transient "Node not found" when DDS briefly loses /explore).
+        if not apply_profile_failure_is_fatal(brain_set_at_launch=True):
+            print(
+                f"[orchestrator] apply_profile soft-fail after retries "
+                f"(brain={spec.profile.brain_id} set at launch): {last_err}",
+                flush=True,
+            )
+            return
+        raise RuntimeError(f"apply_exploration_profile failed: {last_err}")
+
+    def _stop_episode(self) -> None:
+        self._docker("bash /workspace/scripts/stop_sim.sh", check=False)
+        # Give DDS / tmux teardown time before the next cell's start_sim.
+        time.sleep(5.0)
 
     def _collect_metrics(
         self,
@@ -780,7 +817,3 @@ class ExperimentOrchestrator:
             host_progress.write_text(cat.stdout, encoding="utf-8")
         except OSError:
             pass
-
-    def _stop_episode(self) -> None:
-        self._docker("bash /workspace/scripts/stop_sim.sh", check=False)
-        time.sleep(2.0)

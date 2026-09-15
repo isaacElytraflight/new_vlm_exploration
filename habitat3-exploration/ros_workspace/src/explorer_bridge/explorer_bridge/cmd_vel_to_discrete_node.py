@@ -26,7 +26,8 @@ class CmdVelToDiscreteNode(Node):
         self.declare_parameter("action_name", "/movement/discrete_move")
         self.declare_parameter("angular_threshold", 0.05)
         self.declare_parameter("linear_threshold", 0.03)
-        self.declare_parameter("turn_over_drive_ratio", 1.0)
+        self.declare_parameter("turn_over_drive_ratio", 0.5)
+        self.declare_parameter("drive_max_angular", 0.12)
         self.declare_parameter("dispatch_rate_hz", 20.0)
         self.declare_parameter("min_command_interval", 0.15)
         self.declare_parameter("realtime_mode", False)
@@ -41,6 +42,7 @@ class CmdVelToDiscreteNode(Node):
             turn_over_drive_ratio=float(
                 self.get_parameter("turn_over_drive_ratio").value
             ),
+            drive_max_angular=float(self.get_parameter("drive_max_angular").value),
         )
         dispatch_hz = max(1.0, float(self.get_parameter("dispatch_rate_hz").value))
         self._min_interval = max(0.0, float(self.get_parameter("min_command_interval").value))
@@ -61,7 +63,8 @@ class CmdVelToDiscreteNode(Node):
         self.get_logger().info(
             f"cmd_vel bridge listening on {cmd_vel_topic} -> {action_name} "
             f"(realtime_mode={self._realtime_mode}, "
-            f"turn_over_drive_ratio={self._thresholds.turn_over_drive_ratio})"
+            f"turn_over_drive_ratio={self._thresholds.turn_over_drive_ratio}, "
+            f"drive_max_angular={self._thresholds.drive_max_angular})"
         )
 
     def _cmd_vel_cb(self, msg: Twist) -> None:

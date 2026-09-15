@@ -15,7 +15,9 @@ from experiments.config import (  # noqa: E402
     expand_seeds,
     filter_algorithms,
     frozen_config_json,
+    is_timestamped_ablation_id,
     make_ablation_experiment_id,
+    migrate_bare_ablation_campaign,
     resolve_scene_path,
     run_id_for,
 )
@@ -152,6 +154,176 @@ def test_make_ablation_experiment_id_empty_uses_timestamp_negative():
     eid = make_ablation_experiment_id("")
     assert eid.startswith("ablation_run_")
     assert len(eid) > len("ablation_run_")
+
+
+def test_make_ablation_experiment_id_rejects_bare_placeholder_positive():
+    eid = make_ablation_experiment_id("ablation_run")
+    assert eid.startswith("ablation_run_")
+    assert eid != "ablation_run"
+
+
+def test_is_timestamped_ablation_id_negative():
+    assert not is_timestamped_ablation_id("ablation_run")
+    assert not is_timestamped_ablation_id("ablation_run_")
+    assert is_timestamped_ablation_id("ablation_run_20260908_223000")
+
+
+def test_migrate_bare_ablation_campaign_positive(tmp_path: Path):
+    bare = tmp_path / "ablation_run"
+    bare.mkdir()
+    (bare / "campaign_info.json").write_text(
+        '{"experiment_id": "ablation_run"}\n', encoding="utf-8"
+    )
+    assert migrate_bare_ablation_campaign(tmp_path, "ablation_run_20260908_223000")
+    dest = tmp_path / "ablation_run_20260908_223000"
+    assert dest.is_dir()
+    assert not bare.exists()
+    info = (dest / "campaign_info.json").read_text(encoding="utf-8")
+    assert "ablation_run_20260908_223000" in info
+
+
+def test_migrate_bare_ablation_campaign_missing_negative(tmp_path: Path):
+    assert not migrate_bare_ablation_campaign(tmp_path, "ablation_run_20260908_223000")
+
+
+def test_fresh_cli_does_not_migrate_bare_folder_positive(tmp_path: Path, monkeypatch):
+    """Fresh must not attempt to rename a legacy ablation_run/ into the new campaign."""
+    import experiments.run_experiment as re
+
+    project = tmp_path / "proj"
+    (project / "sim" / "data" / "experiments" / "ablation_run").mkdir(parents=True)
+    cfg = project / "smoke.yaml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "experiment_id: ablation_run",
+                "n_runs_per_cell: 1",
+                "timeout_s: 10",
+                "artifact_root: sim/data/experiments",
+                "algorithms:",
+                "  - id: greedy_nearest",
+                "    brain: greedy_nearest",
+                "scenes: [JmbYfDe2QKZ]",
+                "seeds: {mode: sequential, start: 0}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    calls = {"n": 0}
+
+    def track(*_a, **_k):
+        calls["n"] += 1
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(re, "migrate_bare_ablation_campaign", track)
+
+    class FakeOrch:
+        def __init__(self, *a, **k):
+            pass
+
+        def run_all(self):
+            return []
+
+    monkeypatch.setattr(re, "ExperimentOrchestrator", FakeOrch)
+    rc = re.main(
+        [
+            str(cfg),
+            "--project-root",
+            str(project),
+            "--fresh",
+            "--experiment-id",
+            "ablation_run_20260908_223736",
+            "--dry-run",
+        ]
+    )
+    assert rc == 0
+    assert calls["n"] == 0
+
+
+def test_cli_n_runs_per_cell_override_positive(tmp_path: Path, monkeypatch):
+    import experiments.run_experiment as re
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    cfg = project / "smoke.yaml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "experiment_id: ablation_run",
+                "n_runs_per_cell: 1",
+                "timeout_s: 10",
+                "artifact_root: sim/data/experiments",
+                "algorithms:",
+                "  - id: greedy_nearest",
+                "    brain: greedy_nearest",
+                "scenes: [JmbYfDe2QKZ]",
+                "seeds: {mode: sequential, start: 0}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    captured: dict = {}
+
+    class FakeOrch:
+        def __init__(self, config, **_k):
+            captured["n_runs"] = config.n_runs_per_cell
+
+        def run_all(self):
+            return []
+
+    monkeypatch.setattr(re, "ExperimentOrchestrator", FakeOrch)
+    rc = re.main(
+        [
+            str(cfg),
+            "--project-root",
+            str(project),
+            "--fresh",
+            "--n-runs-per-cell",
+            "4",
+            "--dry-run",
+        ]
+    )
+    assert rc == 0
+    assert captured["n_runs"] == 4
+
+
+def test_cli_n_runs_per_cell_invalid_negative(tmp_path: Path):
+    import experiments.run_experiment as re
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    cfg = project / "smoke.yaml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "experiment_id: ablation_run",
+                "n_runs_per_cell: 1",
+                "timeout_s: 10",
+                "algorithms:",
+                "  - id: greedy_nearest",
+                "    brain: greedy_nearest",
+                "scenes: [JmbYfDe2QKZ]",
+                "seeds: {mode: sequential, start: 0}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(SystemExit):
+        re.main(
+            [
+                str(cfg),
+                "--project-root",
+                str(project),
+                "--fresh",
+                "--n-runs-per-cell",
+                "0",
+                "--dry-run",
+            ]
+        )
 
 
 def test_unknown_profile_negative():

@@ -30,6 +30,7 @@ set(EXPLORER_MISSION_LIBS
   discrete_navigator
   nav2_navigator
   wall_unstick
+  nav_fail_policy
 )
 
 add_library(frontier_detection src/frontier_detection.cpp)
@@ -72,6 +73,11 @@ target_include_directories(wall_unstick PUBLIC
 ament_target_dependencies(wall_unstick nav_msgs)
 target_link_libraries(wall_unstick ${OpenCV_LIBS})
 
+add_library(nav_fail_policy src/nav_fail_policy.cpp)
+target_include_directories(nav_fail_policy PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+
 set(node_targets
   actions_node
   frontier_vlm_client_node
@@ -88,10 +94,10 @@ ament_target_dependencies(frontier_vlm_client_node
   rclcpp rclcpp_action sensor_msgs std_msgs explorer_msgs)
 
 add_executable(explore_node src/explore_node.cpp)
-target_link_libraries(explore_node frontier_detection frontier_tree exploration_brain discrete_navigator nav2_navigator wall_unstick)
+target_link_libraries(explore_node frontier_detection frontier_tree exploration_brain discrete_navigator nav2_navigator wall_unstick nav_fail_policy)
 ament_target_dependencies(explore_node
   rclcpp rclcpp_action tf2_ros nav_msgs sensor_msgs std_msgs geometry_msgs
-  diagnostic_msgs explorer_msgs)
+  diagnostic_msgs explorer_msgs nav2_msgs)
 
 install(TARGETS
   ${EXPLORER_MISSION_LIBS}
@@ -173,6 +179,10 @@ if(BUILD_TESTING)
   target_link_libraries(test_wall_unstick wall_unstick)
   target_include_directories(test_wall_unstick PUBLIC include)
   ament_target_dependencies(test_wall_unstick nav_msgs)
+
+  ament_add_gtest(test_nav_fail_policy test/test_nav_fail_policy.cpp)
+  target_link_libraries(test_nav_fail_policy nav_fail_policy)
+  target_include_directories(test_nav_fail_policy PUBLIC include)
 endif()
 
 ament_package()

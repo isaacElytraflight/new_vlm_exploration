@@ -15,7 +15,9 @@ if str(_ROOT) not in sys.path:
 from experiments.config import (  # noqa: E402
     ExperimentConfig,
     filter_algorithms,
+    is_timestamped_ablation_id,
     make_ablation_experiment_id,
+    migrate_bare_ablation_campaign,
 )
 from experiments.orchestrator import ExperimentOrchestrator  # noqa: E402
 
@@ -76,6 +78,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Comma-separated algorithm ids to run (subset of YAML algorithms[])",
     )
+    parser.add_argument(
+        "--n-runs-per-cell",
+        type=int,
+        default=None,
+        help="Override YAML n_runs_per_cell (seeds per algorithm×scene; default from YAML)",
+    )
     args = parser.parse_args(argv)
 
     config = ExperimentConfig.from_yaml(args.config)
@@ -86,14 +94,34 @@ def main(argv: list[str] | None = None) -> int:
     elif args.fresh:
         # Fresh without an explicit id → new ablation_run_<timestamp> folder.
         config.experiment_id = make_ablation_experiment_id()
+    elif str(config.experiment_id).strip() in ("", "ablation_run"):
+        # smoke.yaml placeholder must never become a real folder name (resume path).
+        config.experiment_id = make_ablation_experiment_id()
 
     if args.algorithms is not None:
         selected = [p.strip() for p in str(args.algorithms).split(",") if p.strip()]
         config.algorithms = filter_algorithms(config.algorithms, selected)
 
+    if args.n_runs_per_cell is not None:
+        n = int(args.n_runs_per_cell)
+        if n < 1 or n > 100:
+            parser.error("--n-runs-per-cell must be an integer between 1 and 100")
+        config.n_runs_per_cell = n
+
+    project_root = args.project_root.resolve()
+    # Only Resume may migrate a legacy bare ablation_run/ folder. Fresh must not
+    # rename it into the new campaign id (and must not crash if that folder is locked).
+    if not bool(args.fresh) and is_timestamped_ablation_id(config.experiment_id):
+        artifact_root = project_root / config.artifact_root
+        try:
+            if migrate_bare_ablation_campaign(artifact_root, config.experiment_id):
+                print(f"Migrated bare ablation_run/ → {config.experiment_id}/")
+        except (FileExistsError, PermissionError, OSError) as exc:
+            print(f"WARNING: could not migrate bare ablation_run/: {exc}", file=sys.stderr)
+
     orch = ExperimentOrchestrator(
         config,
-        project_root=args.project_root.resolve(),
+        project_root=project_root,
         dry_run=args.dry_run,
         progress_file=args.progress_file,
         resume=not bool(args.fresh),

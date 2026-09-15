@@ -1,11 +1,13 @@
 #include "explorer_mission/nav2_navigator.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <future>
 
 #include <nav2_msgs/action/navigate_to_pose.hpp>
+#include <nav2_msgs/action/compute_path_to_pose.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
@@ -14,7 +16,10 @@ namespace explorer_mission
 
 Nav2Navigator::Nav2Navigator(rclcpp::Node * node, const std::string & action_name)
 : node_(node),
-  client_(rclcpp_action::create_client<nav2_msgs::action::NavigateToPose>(node, action_name))
+  client_(rclcpp_action::create_client<nav2_msgs::action::NavigateToPose>(node, action_name)),
+  plan_client_(
+    rclcpp_action::create_client<nav2_msgs::action::ComputePathToPose>(
+      node, "compute_path_to_pose"))
 {
 }
 
@@ -124,8 +129,11 @@ bool Nav2Navigator::navigateToPose(
   }
   if (wrapped.code != rclcpp_action::ResultCode::SUCCEEDED) {
     if (last_error_.empty()) {
-      last_error_ = "NavigateToPose failed with code " +
-        std::to_string(static_cast<int>(wrapped.code));
+      // wrapped.code is rclcpp_action::ResultCode; 6 == ABORTED in GoalStatus terms
+      // when mapped through some stacks — always include Nav2 error_code too.
+      last_error_ = "NavigateToPose failed result_code=" +
+        std::to_string(static_cast<int>(wrapped.code)) +
+        " nav_error_code=" + std::to_string(last_error_code_);
     }
     return false;
   }
@@ -160,6 +168,64 @@ bool Nav2Navigator::withinGoalAcceptRadius(
     return false;
   }
   return std::hypot(current_x_ - goal_x, current_y_ - goal_y) <= radius_m;
+}
+
+bool Nav2Navigator::computePathExists(
+  double x, double y, double yaw_rad,
+  const std::string & map_frame,
+  double timeout_s)
+{
+  last_error_.clear();
+  last_error_code_ = 0;
+
+  if (!plan_client_->wait_for_action_server(std::chrono::seconds(2))) {
+    last_error_ = "compute_path_to_pose action server not available";
+    last_error_code_ = 0;
+    return false;
+  }
+
+  nav2_msgs::action::ComputePathToPose::Goal goal;
+  goal.goal.header.frame_id = map_frame;
+  goal.goal.header.stamp = node_->now();
+  goal.goal.pose.position.x = x;
+  goal.goal.pose.position.y = y;
+  tf2::Quaternion q;
+  q.setRPY(0.0, 0.0, yaw_rad);
+  goal.goal.pose.orientation = tf2::toMsg(q);
+  goal.use_start = false;
+
+  auto send_future = plan_client_->async_send_goal(goal);
+  if (send_future.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+    last_error_ = "timed out sending ComputePathToPose goal";
+    return false;
+  }
+  auto goal_handle = send_future.get();
+  if (!goal_handle) {
+    last_error_ = "ComputePathToPose goal rejected";
+    return false;
+  }
+
+  auto result_future = plan_client_->async_get_result(goal_handle);
+  const auto wait = std::chrono::duration<double>(std::max(1.0, timeout_s));
+  if (result_future.wait_for(wait) != std::future_status::ready) {
+    plan_client_->async_cancel_goal(goal_handle);
+    last_error_ = "ComputePathToPose timed out";
+    return false;
+  }
+  const auto wrapped = result_future.get();
+  if (wrapped.code != rclcpp_action::ResultCode::SUCCEEDED || !wrapped.result) {
+    last_error_ = "ComputePathToPose failed";
+    if (wrapped.result) {
+      last_error_code_ = wrapped.result->error_code;
+    }
+    return false;
+  }
+  last_error_code_ = wrapped.result->error_code;
+  if (wrapped.result->error_code != 0) {
+    last_error_ = "ComputePathToPose error_code=" + std::to_string(wrapped.result->error_code);
+    return false;
+  }
+  return !wrapped.result->path.poses.empty();
 }
 
 }  // namespace explorer_mission

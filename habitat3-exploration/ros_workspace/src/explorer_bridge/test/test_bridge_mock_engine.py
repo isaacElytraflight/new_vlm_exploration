@@ -85,3 +85,37 @@ def test_discrete_move_action_success(ros_context):
     stop.set()
     client_node.destroy_node()
     bridge.destroy_node()
+
+
+def test_discrete_move_aborts_on_collision_positive(ros_context):
+    """Habitat may return success with collided=True — bridge must fail the action."""
+    driver = MockHabitatDriver()
+    driver.force_collide_on_forward = True
+    bridge = ExplorerBridgeNode(driver=driver)
+    stop = threading.Event()
+    spin_node_background(bridge, stop)
+
+    client_node = Node("test_collide_client")
+    client = ActionClient(client_node, DiscreteMove, "/movement/discrete_move")
+    spin_node_background(client_node, stop)
+    assert wait_until(lambda: client.server_is_ready())
+
+    goal = DiscreteMove.Goal()
+    goal.direction = DiscreteMove.Goal.FORWARD
+    goal.steps = 5
+    future = client.send_goal_async(goal)
+    assert wait_until(lambda: future.done())
+    goal_handle = future.result()
+    assert goal_handle.accepted
+
+    result_future = goal_handle.get_result_async()
+    assert wait_until(lambda: result_future.done())
+    result = result_future.result().result
+    assert result.success is False
+    assert result.collided is True
+    # Must not have completed all 5 steps after first collide.
+    assert driver._step_count <= 1
+
+    stop.set()
+    client_node.destroy_node()
+    bridge.destroy_node()

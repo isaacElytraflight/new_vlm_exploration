@@ -51,6 +51,14 @@ cv::Point2f frontierMidpointWorld(
   const std::vector<cv::Point> & contour,
   const nav_msgs::msg::OccupancyGrid & grid);
 
+/// Move a frontier midpoint into known free space (away from unknown / walls)
+/// by up to inset_m so Nav2 goals are not on the free↔unknown edge.
+/// Returns the original pose if inset is non-positive or no free step exists.
+cv::Point2f insetFrontierGoalWorld(
+  const nav_msgs::msg::OccupancyGrid & grid,
+  const cv::Point2f & midpoint_world,
+  double inset_m);
+
 double euclideanDist(const cv::Point2f & a, const cv::Point2f & b);
 
 /// Drop later contours whose midpoint is within radius_m of an earlier kept midpoint.

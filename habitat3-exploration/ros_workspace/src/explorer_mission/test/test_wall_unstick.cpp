@@ -180,7 +180,7 @@ TEST(ThrashUnstick, NegativeAttemptClampsToBackwardOne_Negative)
 {
   const auto m = explorer_mission::unstickThrashMotion(-5);
   EXPECT_EQ(m.direction, explorer_mission::kUnstickBackward);
-  EXPECT_EQ(m.steps, 1);
+  EXPECT_EQ(m.steps, explorer_mission::kUnstickStepScale);
 }
 
 TEST(Clearance, FarFromWallHasLargeClearance_Positive)

@@ -29,6 +29,8 @@ _kill_patterns=(
   "vlm_node"
   "vlm_server"
   "explore_episode.py"
+  "experiment_media_recorder.py"
+  "experiment_event_logger.py"
   "static_transform_publisher .* map odom"
   "static_transform_publisher .* base_link depth_frame"
   "ros2 run explorer_bridge"

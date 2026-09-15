@@ -22,6 +22,8 @@ class MockHabitatDriver:
         self._x = 0.0
         self._y = 0.0
         self._yaw_rad = 0.0
+        # When True, the next move_forward reports collided (for bridge tests).
+        self.force_collide_on_forward = False
 
     @property
     def alive(self) -> bool:
@@ -53,20 +55,31 @@ class MockHabitatDriver:
                 message="mock engine is dead",
             )
         self._last_action = action
-        completed = max(0, int(count))
-        self._step_count += completed
-        for _ in range(completed):
+        completed = 0
+        for _ in range(max(0, int(count))):
+            if action == "move_forward" and self.force_collide_on_forward:
+                self._collided = True
+                completed += 1
+                return StepResult(
+                    success=True,
+                    collided=True,
+                    steps_completed=completed,
+                    message="OK (mock collide)",
+                )
             if action == "move_forward":
                 self._collided = False
                 self._x += 0.25 * np.cos(self._yaw_rad)
                 self._y += 0.25 * np.sin(self._yaw_rad)
             elif action == "move_backward":
+                self._collided = False
                 self._x -= 0.25 * np.cos(self._yaw_rad)
                 self._y -= 0.25 * np.sin(self._yaw_rad)
             elif action == "turn_left":
                 self._yaw_rad += np.radians(10.0)
             elif action == "turn_right":
                 self._yaw_rad -= np.radians(10.0)
+            completed += 1
+            self._step_count += 1
         return StepResult(
             success=True,
             collided=self._collided,

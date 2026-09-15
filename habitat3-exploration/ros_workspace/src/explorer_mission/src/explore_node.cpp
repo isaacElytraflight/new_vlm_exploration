@@ -42,6 +42,7 @@
 #include "explorer_mission/discrete_navigator.hpp"
 #include "explorer_mission/exploration_brain.hpp"
 #include "explorer_mission/frontier_detection.hpp"
+#include "explorer_mission/nav_fail_policy.hpp"
 #include "explorer_mission/nav2_navigator.hpp"
 #include "explorer_mission/return_home_guard.hpp"
 #include "explorer_mission/stuck_progress.hpp"
@@ -78,6 +79,8 @@ public:
     unstick_max_steps_ = declare_parameter<int>("unstick_max_steps", 8);
     unstick_max_attempts_ = declare_parameter<int>(
       "unstick_max_attempts", explorer_mission::kDefaultMaxUnstickAttempts);
+    nav2_inflation_radius_m_ = declare_parameter<double>("nav2_inflation_radius_m", 0.22);
+    mapper_inflation_m_ = declare_parameter<double>("mapper_inflation_m", mapper_inflation_m_);
 
     {
       explorer_mission::ExplorationBrainConfig cfg;
@@ -256,13 +259,6 @@ public:
         scan_poses_[detect_key] = current_pos_;
       }
 
-      if (return_home_guard_.isAwaitingReturn()) {
-        const uint32_t scan_id = return_home_guard_.scanNodeId();
-        const cv::Point2f scan_pose = scanPoseFor(scan_id);
-        returnToScanPoseWithRetry(scan_id, scan_pose);
-        continue;
-      }
-
       explorer_mission::BrainDecision decision =
         brain_->selectNextGoal(explorer_mission::BrainContext{current_pos_});
       if (decision.action == explorer_mission::BrainAction::kWait) {
@@ -277,7 +273,10 @@ public:
       publishPendingBrainTelemetry();
 
       if (decision.action == explorer_mission::BrainAction::kComplete) {
-        publishPhase("complete", statusNodeId(), 0, true, decision.detail);
+        publishPhase(
+          "complete", statusNodeId(), 0, true, decision.detail,
+          explorer_mission::terminationReasonCStr(
+            explorer_mission::TerminationReason::kSuccess));
         break;
       }
 
@@ -288,23 +287,36 @@ public:
       }
 
       const uint32_t from_id = detectKey();
-      const bool is_backtrack = decision.detail.find("backtrack") != std::string::npos;
-      publishPhase(
-        is_backtrack ? "backtracking" : "navigating",
-        from_id, decision.goal_id, false, decision.detail);
 
-      const auto nav = navigateWithUnstickRecovery(decision.goal, decision.goal);
-      if (!nav.ok) {
-        if (is_backtrack) {
-          // Parity with old loop: adopt parent as current even if nav failed.
-          brain_->onArrived(decision.goal_id, decision.goal);
-          publishTree();
-          continue;
+      // Theoretical DFS / parent hops: adopt node without physical return.
+      if (decision.theoretical) {
+        publishPhase(
+          "backtracking", from_id, decision.goal_id, false,
+          decision.detail.empty() ? "theoretical backtrack" : decision.detail);
+        brain_->onArrived(decision.goal_id, decision.goal);
+        if (!brain_->usesFrontierTree()) {
+          greedy_detect_key_ = decision.goal_id;
         }
+        publishTree();
+        continue;
+      }
+
+      publishPhase(
+        "navigating", from_id, decision.goal_id, false, decision.detail);
+
+      const auto nav = navigateNewGoalWithRecovery(
+        decision.goal, decision.goal, from_id);
+      if (nav.terminate_stuck) {
+        publishPhase(
+          "complete", statusNodeId(), decision.goal_id, true,
+          "stuck: cannot return to previous node",
+          explorer_mission::terminationReasonCStr(
+            explorer_mission::TerminationReason::kStuck));
+        break;
+      }
+      if (!nav.ok) {
         brain_->onNavFailed(decision.goal_id, nav.mark_frontier_dead);
         publishTree();
-        return_home_guard_.onChildNavFailed(from_id);
-        returnToScanPoseWithRetry(from_id, scanPoseFor(from_id));
         continue;
       }
 
@@ -382,16 +394,41 @@ private:
     if (!tree_pub_) {
       return;
     }
-    const explorer_mission::FrontierTree * tree =
-      brain_ ? brain_->frontierTree() : nullptr;
-    if (!tree) {
-      return;
-    }
     const rclcpp::Time stamp = now();
     const int64_t total_ns = stamp.nanoseconds();
     const int32_t sec = static_cast<int32_t>(total_ns / 1000000000LL);
     const uint32_t nsec = static_cast<uint32_t>(total_ns % 1000000000LL);
-    tree_pub_->publish(tree->toMsg(map_frame_, sec, nsec));
+
+    const explorer_mission::FrontierTree * tree =
+      brain_ ? brain_->frontierTree() : nullptr;
+    if (tree) {
+      tree_pub_->publish(tree->toMsg(map_frame_, sec, nsec));
+      return;
+    }
+    if (!brain_) {
+      return;
+    }
+    // Non-tree brains: publish a flat synthetic tree so maprender green dots work.
+    const auto viz = brain_->vizNodes();
+    explorer_msgs::msg::FrontierTree msg;
+    msg.header.frame_id = map_frame_;
+    msg.header.stamp.sec = sec;
+    msg.header.stamp.nanosec = nsec;
+    msg.current_node_id = brain_->vizCurrentNodeId();
+    msg.nodes.reserve(viz.size());
+    for (const auto & node : viz) {
+      explorer_msgs::msg::FrontierTreeNode out;
+      out.id = node.id;
+      out.position.x = node.position.x;
+      out.position.y = node.position.y;
+      out.position.z = 0.0;
+      out.parent_id = -1;
+      out.openness_score = node.openness_score;
+      out.fully_explored = node.dead;
+      out.visited = node.visited;
+      msg.nodes.push_back(out);
+    }
+    tree_pub_->publish(msg);
   }
 
   void publishPendingGraphEdges()
@@ -479,7 +516,8 @@ private:
     uint32_t current_id,
     uint32_t target_id,
     bool complete,
-    const std::string & detail)
+    const std::string & detail,
+    const std::string & termination_reason = "")
   {
     explorer_msgs::msg::ExplorationStatus status;
     const auto stamp = now();
@@ -490,6 +528,7 @@ private:
     status.target_node_id = target_id;
     status.exploration_complete = complete;
     status.detail = detail;
+    status.termination_reason = termination_reason;
     status_pub_->publish(status);
 
     if (publish_debug_topics_ && debug_events_pub_) {
@@ -545,10 +584,14 @@ private:
     for (size_t i = 0; i < contours.size(); ++i) {
       const cv::Point2f midpoint =
         explorer_mission::frontierMidpointWorld(contours[i], grid);
+      // Pull goal off the free↔unknown edge so Nav2/footprint can plan & arrive.
+      constexpr double kFrontierGoalInsetM = 0.35;
+      const cv::Point2f goal = explorer_mission::insetFrontierGoalWorld(
+        grid, midpoint, kFrontierGoalInsetM);
       explorer_mission::FrontierCandidate c;
       // Tree brain ignores id; greedy needs stable ids within this detect batch.
       c.id = brain_->usesFrontierTree() ? 0u : (greedy_id_base + static_cast<uint32_t>(i));
-      c.position = midpoint;
+      c.position = goal;
       candidates.push_back(c);
     }
 
@@ -567,24 +610,16 @@ private:
     }
 
     if (cached_images_.empty()) {
-      RCLCPP_WARN(get_logger(), "No cached scan images; soft-failing new frontiers to score=0");
-      std::unordered_map<uint32_t, uint8_t> zeros;
-      for (uint32_t id : new_ids) {
-        zeros[id] = 0;
-      }
-      brain_->onVlmScores(zeros);
+      RCLCPP_WARN(get_logger(), "No cached scan images; soft-failing new frontiers to score=1");
+      brain_->softFailUnrated(1);
       publishTree();
       return true;
     }
 
     auto views = buildFrontierViews(new_ids);
     if (views.frontier_ids.empty()) {
-      RCLCPP_WARN(get_logger(), "Failed to match images to frontiers; soft-fail score=0");
-      std::unordered_map<uint32_t, uint8_t> zeros;
-      for (uint32_t id : new_ids) {
-        zeros[id] = 0;
-      }
-      brain_->onVlmScores(zeros);
+      RCLCPP_WARN(get_logger(), "Failed to match images to frontiers; soft-fail score=1");
+      brain_->softFailUnrated(1);
       publishTree();
       return true;
     }
@@ -871,7 +906,162 @@ private:
   {
     bool ok{false};
     bool mark_frontier_dead{true};
+    bool terminate_stuck{false};
   };
+
+  bool nearPose(const cv::Point2f & pose) const
+  {
+    if (goal_accept_radius_m_ <= 0.0) {
+      return false;
+    }
+    return std::hypot(
+      static_cast<double>(current_pos_.x - pose.x),
+      static_cast<double>(current_pos_.y - pose.y)) <= goal_accept_radius_m_;
+  }
+
+  bool theoreticalPlanTo(const cv::Point2f & pose)
+  {
+    updateRobotPoseFromTf();
+    if (nearPose(pose)) {
+      return true;
+    }
+    if (navigation_mode_ == "nav2" && nav2_navigator_) {
+      return nav2_navigator_->computePathExists(
+        pose.x, pose.y, 0.0, map_frame_, 15.0);
+    }
+    // Discrete mode: straight-line plan always "exists" geometrically.
+    return true;
+  }
+
+  /// NEW-frontier nav fail policy: inaccessible vs stuck recovery.
+  NavAttemptResult navigateNewGoalWithRecovery(
+    const cv::Point2f & goal_pos,
+    const cv::Point2f & look_at,
+    uint32_t prior_id)
+  {
+    const rclcpp::Time nav_start = now();
+    if (navigateToPosition(goal_pos, look_at)) {
+      return NavAttemptResult{true, false, false};
+    }
+    const double nav_dt_s = (now() - nav_start).seconds();
+    const bool nav_substantive = explorer_mission::isSubstantiveNavAttempt(nav_dt_s);
+
+    const uint16_t nav_error_code =
+      (nav2_navigator_ != nullptr) ? nav2_navigator_->lastErrorCode() : 0;
+    const std::string nav_error =
+      (nav2_navigator_ != nullptr) ? nav2_navigator_->lastError() : std::string{};
+
+    const bool prior_known = scan_poses_.count(prior_id) != 0;
+    const cv::Point2f prior_pose = scanPoseFor(prior_id);
+    const bool prior_plan_ok = prior_known && theoreticalPlanTo(prior_pose);
+
+    // Explicit NEW-goal ComputePath check (captures error_code for logging /
+    // definitive-unreachable gating). Do not treat TF/timeout/unknown as inaccessible.
+    bool new_goal_plan_ok = false;
+    uint16_t new_plan_code = 0;
+    std::string new_plan_err;
+    updateRobotPoseFromTf();
+    if (nearPose(goal_pos)) {
+      new_goal_plan_ok = true;
+    } else if (navigation_mode_ == "nav2" && nav2_navigator_) {
+      new_goal_plan_ok = nav2_navigator_->computePathExists(
+        goal_pos.x, goal_pos.y, 0.0, map_frame_, 15.0);
+      new_plan_code = nav2_navigator_->lastErrorCode();
+      new_plan_err = nav2_navigator_->lastError();
+    } else {
+      new_goal_plan_ok = true;
+    }
+    const bool new_unreachable_definitive =
+      !new_goal_plan_ok &&
+      explorer_mission::isDefinitiveGoalUnreachable(new_plan_code);
+
+    const double start_clearance = currentClearanceM();
+    const bool start_ok = explorer_mission::isStartClearanceOk(
+      start_clearance, unstick_min_clearance_m_);
+
+    RCLCPP_WARN(
+      get_logger(),
+      "NEW frontier nav fail: nav_dt=%.3fs substantive=%d nav_err='%s' nav_code=%u "
+      "new_plan_ok=%d new_plan_code=%u new_plan_err='%s' definitive=%d "
+      "prior_plan_ok=%d prior=%u start_clearance=%.3f start_ok=%d",
+      nav_dt_s, static_cast<int>(nav_substantive),
+      nav_error.c_str(), static_cast<unsigned>(nav_error_code),
+      static_cast<int>(new_goal_plan_ok), static_cast<unsigned>(new_plan_code),
+      new_plan_err.c_str(), static_cast<int>(new_unreachable_definitive),
+      static_cast<int>(prior_plan_ok), prior_id,
+      start_clearance, static_cast<int>(start_ok));
+
+    const auto fail_class = explorer_mission::classifyNewGoalNavFailure(
+      prior_known, prior_plan_ok, new_goal_plan_ok, new_unreachable_definitive,
+      start_ok);
+
+    if (fail_class == explorer_mission::NewGoalFailClass::kInaccessible) {
+      RCLCPP_WARN(
+        get_logger(),
+        "NEW frontier definitively unplannable (code=%u) and prior %u reachable "
+        "(nav_dt=%.2fs start_ok) — mark inaccessible (no thrash)",
+        static_cast<unsigned>(new_plan_code), prior_id, nav_dt_s);
+      return NavAttemptResult{false, true, false};
+    }
+
+    // Stuck: wedged start, prior unreachable, NEW still plannable, or inconclusive.
+    RCLCPP_WARN(
+      get_logger(),
+      "NEW frontier nav fail not definitive inaccessible — treating as stuck "
+      "(will thrash then deflate-return)");
+
+    publishPhase(
+      "unsticking", statusNodeId(), prior_id, false,
+      "stuck recovery: wall thrash");
+    for (int i = 0; i < unstick_max_attempts_; ++i) {
+      runWallUnstick(i);
+    }
+
+    publishPhase(
+      "backtracking", statusNodeId(), prior_id, false,
+      "stuck recovery: deflate + return to previous");
+    applyCostmapInflation(0.0, 0.0);
+    bool back_ok = navigateToPosition(prior_pose, prior_pose);
+    if (!back_ok) {
+      for (int i = 0; i < unstick_max_attempts_ && !back_ok; ++i) {
+        runWallUnstick(i);
+        back_ok = navigateToPosition(prior_pose, prior_pose);
+      }
+    }
+    applyCostmapInflation(nav2_inflation_radius_m_, mapper_inflation_m_);
+    updateRobotPoseFromTf();
+    if (!back_ok && nearPose(prior_pose)) {
+      back_ok = true;
+    }
+    if (!back_ok) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "Stuck recovery failed: cannot return to prior node %u", prior_id);
+      return NavAttemptResult{false, false, true};
+    }
+
+    RCLCPP_INFO(
+      get_logger(),
+      "Returned to prior %u; retrying NEW frontier with normal inflation",
+      prior_id);
+    if (navigateToPosition(goal_pos, look_at)) {
+      return NavAttemptResult{true, false, false};
+    }
+    updateRobotPoseFromTf();
+    const bool start_ok_after = explorer_mission::isStartClearanceOk(
+      currentClearanceM(), unstick_min_clearance_m_);
+    if (!explorer_mission::shouldMarkDeadAfterStuckRecovery(start_ok_after)) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "Still wedged after stuck recovery (clearance low) — ending episode stuck "
+        "instead of blacklisting remaining frontiers");
+      return NavAttemptResult{false, false, true};
+    }
+    RCLCPP_WARN(
+      get_logger(),
+      "NEW frontier still unreachable after unstuck (start clear) — marking dead");
+    return NavAttemptResult{false, true, false};
+  }
 
   double currentClearanceM()
   {
@@ -990,7 +1180,7 @@ private:
     const cv::Point2f & goal_pos, const cv::Point2f & look_at)
   {
     if (navigateToPosition(goal_pos, look_at)) {
-      return NavAttemptResult{true, false};
+      return NavAttemptResult{true, false, false};
     }
 
     int unstick_attempts = 0;
@@ -1017,7 +1207,7 @@ private:
         runWallUnstick(unstick_attempts);
         ++unstick_attempts;
         if (navigateToPosition(goal_pos, look_at)) {
-          return NavAttemptResult{true, false};
+          return NavAttemptResult{true, false, false};
         }
         continue;
       }
@@ -1032,12 +1222,12 @@ private:
         applyCostmapInflation(nav2_inflation_radius_m_, mapper_inflation_m_);
         zero_inflation_done = true;
         if (ok) {
-          return NavAttemptResult{true, false};
+          return NavAttemptResult{true, false, false};
         }
         continue;
       }
 
-      return NavAttemptResult{false, decision.mark_frontier_dead};
+      return NavAttemptResult{false, decision.mark_frontier_dead, false};
     }
   }
 
@@ -1145,7 +1335,7 @@ private:
   int unstick_max_steps_{8};
   int unstick_max_attempts_{explorer_mission::kDefaultMaxUnstickAttempts};
   /// Nominal inflation restored after last-ditch zero-inflation retry.
-  double nav2_inflation_radius_m_{0.15};
+  double nav2_inflation_radius_m_{0.22};
   double mapper_inflation_m_{0.05};
 
   explorer_mission::ReturnHomeGuard return_home_guard_;

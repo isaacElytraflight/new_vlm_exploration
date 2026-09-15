@@ -367,11 +367,19 @@ class ExplorerBridgeNode(Node):
                     collided = collided or step_result.collided
                     # Same lock: depth + odom share one pose (prevents spiral maps).
                     self._publish_sensor_data_locked()
+                    # Habitat often returns success=True with collided=True when the
+                    # agent walks into geometry — stop so Nav2 cannot keep ramming.
+                    if step_result.collided:
+                        result.success = False
+                        result.collided = True
+                        result.message = "collided"
+                        goal_handle.abort()
+                        return result
                 feedback.steps_completed = completed
                 goal_handle.publish_feedback(feedback)
 
             result.success = True
-            result.collided = collided
+            result.collided = False
             result.message = "OK"
             goal_handle.succeed()
             return result

@@ -34,6 +34,8 @@ struct BrainDecision
   uint32_t goal_id{0};
   cv::Point2f goal;
   std::string detail;
+  /// If true, adopt goal_id without physical NavigateToPose (DFS parent hop).
+  bool theoretical{false};
 };
 
 struct BrainContext
@@ -64,6 +66,17 @@ struct VlmChoiceRecord
   std::vector<uint32_t> candidate_ids;
 };
 
+/// Map-overlay snapshot for non-tree brains (and synthetic tree publish).
+struct BrainVizNode
+{
+  uint32_t id{0};
+  cv::Point2f position;
+  bool visited{false};
+  /// Permanently abandoned (dead). Distinct from visited.
+  bool dead{false};
+  uint8_t openness_score{255};
+};
+
 /// Pluggable high-level exploration policy (Goal C).
 /// Orchestration (detection geometry, Nav2, thrash) stays in explore_node.
 class ExplorationBrain
@@ -80,6 +93,10 @@ public:
   /// Tree memory when usesFrontierTree(); otherwise nullptr.
   virtual const FrontierTree * frontierTree() const {return nullptr;}
   virtual FrontierTree * frontierTree() {return nullptr;}
+
+  /// Flat frontier markers when frontierTree() is null (greedy / graph).
+  virtual std::vector<BrainVizNode> vizNodes() const {return {};}
+  virtual uint32_t vizCurrentNodeId() const {return 0;}
 
   /// Snapshot helpers for event JSONL (visited / live frontier ids).
   virtual std::vector<uint32_t> visitedIds() const {return {};}

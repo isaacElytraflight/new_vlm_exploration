@@ -153,6 +153,120 @@ cv::Point2f frontierMidpointWorld(
   return pixelToWorld(cv::Point2f(static_cast<float>(avgx), static_cast<float>(avgy)), grid);
 }
 
+namespace
+{
+
+bool worldToGridCell(
+  const nav_msgs::msg::OccupancyGrid & grid,
+  double x_m, double y_m, int * col, int * row)
+{
+  if (grid.info.width == 0 || grid.info.height == 0 || grid.info.resolution <= 0.0) {
+    return false;
+  }
+  const double res = grid.info.resolution;
+  const int c = static_cast<int>(std::floor(
+      (x_m - grid.info.origin.position.x) / res));
+  const int r = static_cast<int>(std::floor(
+      (y_m - grid.info.origin.position.y) / res));
+  if (c < 0 || r < 0 ||
+    c >= static_cast<int>(grid.info.width) ||
+    r >= static_cast<int>(grid.info.height))
+  {
+    return false;
+  }
+  *col = c;
+  *row = r;
+  return true;
+}
+
+int8_t gridOcc(
+  const nav_msgs::msg::OccupancyGrid & grid, int col, int row)
+{
+  const size_t idx =
+    static_cast<size_t>(row) * static_cast<size_t>(grid.info.width) +
+    static_cast<size_t>(col);
+  if (idx >= grid.data.size()) {
+    return 100;
+  }
+  return grid.data[idx];
+}
+
+bool isKnownFree(int8_t v)
+{
+  return v >= 0 && v < 50;
+}
+
+}  // namespace
+
+cv::Point2f insetFrontierGoalWorld(
+  const nav_msgs::msg::OccupancyGrid & grid,
+  const cv::Point2f & midpoint_world,
+  double inset_m)
+{
+  if (inset_m <= 0.0 || grid.info.resolution <= 0.0) {
+    return midpoint_world;
+  }
+  int col = 0;
+  int row = 0;
+  if (!worldToGridCell(grid, midpoint_world.x, midpoint_world.y, &col, &row)) {
+    return midpoint_world;
+  }
+
+  // Bias direction: toward known-free neighbors, away from unknown/occupied.
+  double dx = 0.0;
+  double dy = 0.0;
+  int samples = 0;
+  const int w = static_cast<int>(grid.info.width);
+  const int h = static_cast<int>(grid.info.height);
+  for (int dr = -2; dr <= 2; ++dr) {
+    for (int dc = -2; dc <= 2; ++dc) {
+      if (dc == 0 && dr == 0) {
+        continue;
+      }
+      const int cc = col + dc;
+      const int rr = row + dr;
+      if (cc < 0 || rr < 0 || cc >= w || rr >= h) {
+        continue;
+      }
+      const int8_t v = gridOcc(grid, cc, rr);
+      const double weight = isKnownFree(v) ? 1.0 : (v < 0 ? -1.0 : -0.5);
+      dx += weight * static_cast<double>(dc);
+      dy += weight * static_cast<double>(dr);
+      ++samples;
+    }
+  }
+  if (samples == 0) {
+    return midpoint_world;
+  }
+  const double norm = std::hypot(dx, dy);
+  if (norm < 1e-6) {
+    return midpoint_world;
+  }
+  dx /= norm;
+  dy /= norm;
+
+  const int max_steps = std::max(
+    1, static_cast<int>(std::ceil(inset_m / grid.info.resolution)));
+  int best_c = col;
+  int best_r = row;
+  for (int s = 1; s <= max_steps; ++s) {
+    const int cc = static_cast<int>(std::round(col + dx * s));
+    const int rr = static_cast<int>(std::round(row + dy * s));
+    if (cc < 0 || rr < 0 || cc >= w || rr >= h) {
+      break;
+    }
+    if (!isKnownFree(gridOcc(grid, cc, rr))) {
+      break;
+    }
+    best_c = cc;
+    best_r = rr;
+  }
+  if (best_c == col && best_r == row) {
+    return midpoint_world;
+  }
+  return pixelToWorld(cv::Point(best_c, best_r), grid);
+}
+
 double euclideanDist(const cv::Point2f & a, const cv::Point2f & b)
 {
   const double dx = a.x - b.x;
