@@ -120,13 +120,12 @@ to “free” (`free_near_eps`). That hid real far walls and did not stop floor 
 
 ### Navigation
 
-- **Default:** `explore_node` with `navigation_mode:=nav2` sends `NavigateToPose` goals; Nav2 plans on costmaps; `/cmd_vel` is converted to discrete Habitat steps via `cmd_vel_to_discrete_node`.
-- **No-recovery BT:** `config/navigate_to_pose_no_recovery.xml` — plan fail aborts immediately (no Spin/BackUp). Explore classifies NEW-goal failures via `nav_fail_policy` (inaccessible vs stuck): thrash BACK/FWD, optional zero-inflation return to prior, one retry; still-wedged → `termination_reason=stuck` without burning the remaining frontier tree.
-- **Discrete bridge:** `turn_over_drive_ratio` (default 0.5) + `drive_max_angular` (default 0.12) so mild RPP corner arcs prefer TURN over 0.25 m FORWARD. Habitat reports `collided` → DiscreteMove abort.
-- **Planner:** Navfn `allow_unknown: true` (paths may traverse unexplored cells), goal `tolerance: 1.0` m; costmap `inflation_radius` 0.22 m (≥ `robot_radius` 0.18).
-- **Fallback:** `navigation_mode:=discrete` uses straight-line `discrete_navigator` + `/movement/discrete_move` (no obstacle planning).
+- **Default:** `navigation_mode:=discrete` — lattice A* in DiscreteMove space (F/B 0.25 m, turn ±10°) on `/grid_map` with soft footprint inflation, then `/movement/discrete_move`. Nav2 is not started.
+- **Optional legacy:** `navigation_mode:=nav2` — NavigateToPose + `cmd_vel_to_discrete` quantization (not recommended for hexapod transfer).
+- **Fail policy:** `nav_fail_policy` still classifies inaccessible vs stuck using discrete path-exists checks in discrete mode.
+- **Geometric helper:** obstacle-unaware `planToPose` remains for unit tests only.
 
-**Known serious issues (2026-09-15):** Path follow and recovery are **not** production-quality. Blue `/plan` can look correct while DiscreteMove still wedges into walls; episodes often end `stuck` or historically showed fake early `success` after mass frontier death. See [FUTURE_GOALS.md](../../FUTURE_GOALS.md) § Known serious issues. Do not treat ablation coverage alone as evidence that nav is healthy.
+**Verify:** rebuild `explorer_mission`, run greedy stress with discrete mode. Do not treat ablation coverage alone as proof of nav health until corner follow is visually sane.
 
 ### Exploration loop (frontier tree)
 

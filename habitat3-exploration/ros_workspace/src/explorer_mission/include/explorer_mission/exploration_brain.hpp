@@ -49,6 +49,9 @@ struct ExplorationBrainConfig
   bool parent_to_nearest_node{true};
   /// kNN degree for graph brains (clamped to ~3–5 in builders).
   int graph_knn{5};
+  /// Reject rediscovered frontiers within this radius of a dead pose.
+  /// Survives id churn across detects (all brains).
+  float dead_pose_radius_m{1.0f};
 };
 
 struct GraphEdge

@@ -104,4 +104,6 @@ fi
 
 exec ros2 launch explorer_mission nav2_exploration.launch.py \
   driver_backend:=habitat \
-  brain_id:="$BRAIN_ID"
+  brain_id:="$BRAIN_ID" \
+  navigation_mode:=discrete \
+  frontiers_grid_topic:=/grid_map

@@ -40,10 +40,18 @@ def test_sim_launch_wires_cmd_vel_bypass_positive():
     assert '("cmd_vel_smoothed", "cmd_vel")' in text
 
 
-def test_parent_uses_sim_navigation_launch_positive():
+def test_parent_defaults_to_discrete_nav_positive():
     text = PARENT_LAUNCH.read_text(encoding="utf-8")
-    assert "navigation_sim.launch.py" in text
-    assert "navigation_launch.py" not in text
+    assert 'default_value="discrete"' in text
+    assert "frontiers_grid_topic" in text
+    assert "/grid_map" in text
+
+
+def test_parent_gates_nav2_behind_mode_positive():
+    text = PARENT_LAUNCH.read_text(encoding="utf-8")
+    assert "use_nav2" in text
+    assert "cmd_vel_to_discrete" in text
+    assert "IfCondition(use_nav2)" in text
 
 
 def test_sim_launch_wires_no_recovery_bt_positive():

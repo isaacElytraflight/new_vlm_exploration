@@ -6,6 +6,110 @@ Add a new dated section at the top when you work on this repo.
 
 ---
 
+## 2026-09-21 — Discrete lattice navigation (stop quantizing Nav2)
+
+**Branch:** `discrete-lattice-nav`
+
+**Why:** Hexapod moves in DiscreteMove steps. Nav2→cmd_vel→quantize was the root wedge source; stuck protocols were compensating.
+
+**Change:**
+- Lattice A* in DiscreteMove action space on `/grid_map` (`planOnOccupancy`): F/B 0.25 m, turn ±10°, soft footprint inflation, unknown traversable.
+- Default `navigation_mode:=discrete`; Nav2 + `cmd_vel_to_discrete` only if `navigation_mode:=nav2`.
+- Frontiers default `/grid_map`. Path-exists checks use the same lattice planner.
+- Straight-line `planToPose` kept as obstacle-unaware helper only.
+
+**Run:** rebuild `explorer_mission`, restart episode (start_sim already passes discrete). Opt back into Nav2 with `navigation_mode:=nav2`.
+
+---
+
+## 2026-09-21 — Soft-skip wedged goals (no 31 min keep-live loop)
+
+**Evidence (`ablation_run_20260921_215537` seed1):** Seed0 hit **89.2%** real success. Seed1 cancelled after ~35 min: **317× `wedged_keep_live`** on goal **101** at `(-3.73,-8.55)`, clearance 0.048, 11 live frontiers unused.
+
+**Root cause:** keep-live left the same nearest goal in `live_`; recovery retried forever.
+
+**Fix:**
+1. Greedy `onNavFailed(mark_dead=false)` still `eraseLive` (soft-skip, not geographic dead).
+2. Resolutions `wedged_soft_skip` / `recovery_failed_soft_skip`.
+3. `shouldAcceptBrainComplete(false)` → terminate `stuck` instead of fake success when soft-skips empty live while wedged.
+4. Policy helpers `shouldSoftSkipWedgedGoal` / `shouldAcceptBrainComplete` (`kMaxWedgedKeepLivePerGoal=1`).
+
+---
+
+**Evidence (`ablation_run_20260920_172413`):** Both seeds `term=success` / `no live frontiers` at 67.7% / 83.8%. Not real completion.
+
+**Sequence (both seeds):** Robot ends at a death pose with `start_clearance_ok=false` (`clearance≈0.05–0.10`, `costmap_at_robot=99`). Then a burst of **instant (~30ms) Nav2 208** fails — one per remaining live frontier — each classified `inaccessible` → `mark_dead`. Live hits 0 → brain `complete`. Seed0: 19 mark_deads in ~1s at `(-1.22,-1.84)`. Seed1: one real stuck recovery (`wedged_retry_mark_dead`) then 15 instant inaccessible mark_deads at `(-1.72,-3.37)`.
+
+**Root cause:** Prior policy treated non-substantive definitive reject as inaccessible *even when start was wedged* (to avoid thrash→terminate). Planner cannot leave a wedged start, so **every** goal looks like 208 → mass blacklist → fake success.
+
+**Fix:**
+1. `classifyNewGoalNavFailure`: inaccessible **only** when `start_clearance_ok` (instant 208 while wedged → stuck / recover).
+2. `shouldMarkDeadAfterStuckRecovery`: return `start_clearance_ok_after` (still-wedged → `wedged_keep_live` / `recovery_failed_keep_live`, keep frontier).
+3. Wire those resolutions in `explore_node` post-recovery returns.
+
+**Did not work previously:** never-terminate + always mark-dead after recovery stopped `terminate_stuck` but created this false-success wipe.
+
+---
+
+## 2026-09-20 — Seed0: never terminate from nav recovery
+
+**Seed0 (`161218`):** Substantive 106 fail mid-path to far goal; thrash landed ~1m from prior → `nearPose` counted return OK → NEW retry failed while wedged → `terminate_stuck` at 53% with 17 live frontiers.
+
+**Fix:**
+1. `nearPose` only counts as successful return if clearance is OK.
+2. Recovery never returns `terminate_stuck` — always mark NEW dead and continue (`recovery_failed_mark_dead` / `wedged_retry_mark_dead`).
+3. `shouldTerminateAfterReturnToPriorFailed` always false.
+
+---
+
+## 2026-09-20 — Still-wedged post-recovery: mark dead, don't terminate
+
+**Evidence (`ablation_run_20260920_161218`):** Seed1 reached **89.2%** then `terminate_stuck` after return/sanctuary + NEW retry with clearance still ~0.1m (12 live frontiers left). Instant-reject + sanctuary fixes were working (`recovery_failed_mark_dead`, inaccessible mark_dead).
+
+**Fix:** `shouldMarkDeadAfterStuckRecovery` always returns true → publish `wedged_retry_mark_dead` / `retry_failed_mark_dead` and continue. Geographic dead-pose radius limits resurrection.
+
+---
+
+## 2026-09-20 — Return-to-prior terminate: skip thrash on instant 208
+
+**Evidence (`ablation_run_20260920_154400`):** Geographic dead fix OK (no corner resurrection). Both seeds still `terminate_stuck` after thrash on **non-substantive** (~30ms) Nav2 208 fails.
+
+**Fix:**
+1. `classifyNewGoalNavFailure(..., substantive)`: instant definitive reject + prior OK → **inaccessible** (mark dead, no thrash) even if clearance low.
+2. If thrash still runs and return-to-prior fails: try other `scan_poses_` sanctuaries; if those fail but alternates existed → `recovery_failed_mark_dead` and continue (terminate only when no alternate sanctuary exists).
+
+**Verify:** `test_nav_fail_policy` + brain tests green after rebuild.
+
+---
+
+## 2026-09-20 — Greedy death-corner: id-only dead_ resurrects same pose
+
+**Evidence (`ablation_run_20260915_200851`):** Both seeds terminate `stuck: cannot return to previous node`. Nav_fail shows universal Nav2 **208**; death corner **(-0.55,-3.45)** reappears as new ids (28→34→35→36) after `mark_dead`.
+
+**Root cause A (fixed for all brains):** Frontier id churn + id-only `dead_` → geographic blacklist never sticks. Applied `dead_pose_radius_m` (default 1.0) in greedy, tree DFS, frontier graph, and choice+dijkstra.
+
+**Fix verify:** `test_exploration_brain` 40 passed (incl. tree/graph same-pose resurrection tests).
+
+**Root cause B (open):** Return-to-prior after thrash. Separate; do not guess thrash changes yet.
+
+---
+
+## 2026-09-15 — Stuck investigation: log-only instrumentation (no behavior change)
+
+**Goal:** Capture nav-fail evidence in ablation `events.jsonl` before guessing more recovery heuristics.
+
+**Added:**
+- `explorer_msgs/NavFailEvent` on `/exploration/nav_fail` (`classified` + `resolved`) with Nav2 codes, clearance, `/grid_map` + `/global_costmap/costmap` cell samples
+- `BrainDecisionEvent`: `robot_x/y`, `goal_distance_m`
+- Event logger + `event_shapes` compact helpers
+- Frontier inset mean/moved ROS_INFO in detect
+
+**Verify:** host `test_event_log_shape` 14 passed; in-container `test_frontier_detection` + `test_nav_fail_policy` passed; `colcon build explorer_msgs explorer_mission` OK.
+
+**Next:** run `greedy_stress.yaml` on `JmbYfDe2QKZ` and analyze `exploration/nav_fail` trails.
+
+---
+
 ## 2026-09-15 — Checkpoint commit (serious nav issues remain)
 
 Shipped working-tree nav-fail / path-follow / ablation-ops fixes to `main`. **Not claiming solved:** DiscreteMove corner follow still imperfect; advanced recovery ending `stuck` often underperforms older thrash-forever coverage; fake early `success` / mass-blacklist remains a metric hazard. Documented in `FUTURE_GOALS.md` and `design_doc.md`.

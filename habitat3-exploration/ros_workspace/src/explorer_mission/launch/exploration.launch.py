@@ -44,7 +44,7 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("habitat_socket_path", default_value="/tmp/habitat_engine.sock"),
         DeclareLaunchArgument("publish_hz", default_value="15.0"),
         DeclareLaunchArgument("use_privileged_map", default_value="false"),
-        DeclareLaunchArgument("navigation_mode", default_value="nav2"),
+        DeclareLaunchArgument("navigation_mode", default_value="discrete"),
         DeclareLaunchArgument("frontier_detection_radius", default_value="50.0"),
         DeclareLaunchArgument("frontier_exclusion_radius", default_value="1.0"),
         DeclareLaunchArgument("publish_debug_topics", default_value="false"),

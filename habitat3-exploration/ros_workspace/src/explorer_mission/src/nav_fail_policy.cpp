@@ -39,19 +39,52 @@ NewGoalFailClass classifyNewGoalNavFailure(
   bool prior_plan_ok,
   bool new_goal_plan_ok,
   bool new_goal_unreachability_definitive,
-  bool start_clearance_ok)
+  bool start_clearance_ok,
+  bool /*nav_attempt_substantive*/)
 {
-  if (prior_pose_known && prior_plan_ok && start_clearance_ok &&
-    !new_goal_plan_ok && new_goal_unreachability_definitive)
+  if (!prior_pose_known || !prior_plan_ok || new_goal_plan_ok ||
+    !new_goal_unreachability_definitive)
   {
+    return NewGoalFailClass::kStuck;
+  }
+  // Goal is only "inaccessible" when the robot itself is clear enough that
+  // NO_VALID_PATH is about the goal. Instant 208 while wedged used to take the
+  // inaccessible path and wipe every remaining frontier in ~1s.
+  if (start_clearance_ok) {
     return NewGoalFailClass::kInaccessible;
   }
   return NewGoalFailClass::kStuck;
 }
 
+const char * newGoalFailClassCStr(NewGoalFailClass c)
+{
+  switch (c) {
+    case NewGoalFailClass::kInaccessible:
+      return "inaccessible";
+    case NewGoalFailClass::kStuck:
+    default:
+      return "stuck";
+  }
+}
+
 bool shouldMarkDeadAfterStuckRecovery(bool start_clearance_ok_after)
 {
   return start_clearance_ok_after;
+}
+
+bool shouldSoftSkipWedgedGoal(uint32_t keep_live_attempts_on_goal)
+{
+  return keep_live_attempts_on_goal >= kMaxWedgedKeepLivePerGoal;
+}
+
+bool shouldAcceptBrainComplete(bool start_clearance_ok)
+{
+  return start_clearance_ok;
+}
+
+bool shouldTerminateAfterReturnToPriorFailed(bool /*have_alternate_sanctuary*/)
+{
+  return false;
 }
 
 const char * terminationReasonCStr(TerminationReason reason)

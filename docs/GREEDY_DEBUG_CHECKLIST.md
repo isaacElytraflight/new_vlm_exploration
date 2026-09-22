@@ -51,6 +51,9 @@ ros2 topic echo /exploration/status
 # Brain decisions (goal selection)
 ros2 topic echo /exploration/brain/decision
 
+# Nav fail diagnostics (classified + resolved; lands in events.jsonl)
+ros2 topic echo /exploration/nav_fail
+
 # Frontier tree (flat nodes for greedy)
 ros2 topic echo /exploration/frontier_tree
 
@@ -98,6 +101,9 @@ grep '"fully_explored":true' logs/events.jsonl | wc -l
 
 # See decision sequence
 grep 'brain/decision' logs/events.jsonl | jq '.action, .goal_id, .detail, .live_ids | length'
+
+# Nav-fail classification trail (instrumentation)
+grep 'exploration/nav_fail' logs/events.jsonl | jq '{stage,fail_class,resolution,nav_error_code,new_plan_code,start_clearance_m,start_clearance_ok,costmap_at_robot,costmap_at_goal}'
 ```
 
 ### 3. Key Questions to Answer
@@ -111,8 +117,7 @@ For each stuck episode, determine:
    ```
 
 2. **What was the final robot position vs. frontiers?**
-   - Check last `brain/decision` for `goal_x`, `goal_y`
-   - Compare to robot pose in same event
+   - Check last `brain/decision` for `goal_x`, `goal_y`, `robot_x`, `robot_y`, `goal_distance_m`
 
 3. **Was it truly stuck or false positive?**
    - Look at `media/final_grid_map.png`
@@ -121,8 +126,7 @@ For each stuck episode, determine:
 
 4. **What Nav2 error codes appeared?**
    ```bash
-   # In container logs or event logger output
-   grep "nav_code\|nav_error" /path/to/logs/*.log
+   grep 'exploration/nav_fail' logs/events.jsonl | jq '{stage,fail_class,resolution,nav_error_code,new_plan_code,start_clearance_m}'
    ```
 
 ---

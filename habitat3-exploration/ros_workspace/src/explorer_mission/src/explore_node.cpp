@@ -37,6 +37,7 @@
 #include <explorer_msgs/msg/frontier_openness_scores.hpp>
 #include <explorer_msgs/msg/frontier_tree.hpp>
 #include <explorer_msgs/msg/frontier_views.hpp>
+#include <explorer_msgs/msg/nav_fail_event.hpp>
 #include <explorer_msgs/msg/vlm_choice_event.hpp>
 
 #include "explorer_mission/discrete_navigator.hpp"
@@ -63,7 +64,9 @@ public:
   {
     map_frame_ = declare_parameter<std::string>("map_frame", "map");
     base_frame_ = declare_parameter<std::string>("base_frame", "base_link");
-    navigation_mode_ = declare_parameter<std::string>("navigation_mode", "nav2");
+    navigation_mode_ = declare_parameter<std::string>("navigation_mode", "discrete");
+    discrete_robot_radius_m_ = declare_parameter<double>("discrete_robot_radius_m", 0.20);
+    discrete_allow_unknown_ = declare_parameter<bool>("discrete_allow_unknown", true);
     frontier_detection_radius_ = declare_parameter<double>("frontier_detection_radius", 50.0);
     frontier_exclusion_radius_ = declare_parameter<double>("frontier_exclusion_radius", 1.0);
     min_contour_pixels_ = declare_parameter<int>("min_contour_pixels", 15);
@@ -72,6 +75,8 @@ public:
     brain_id_ = declare_parameter<std::string>("brain_id", "vlm_tree_dfs");
     dfs_prefer_highest_openness_ = declare_parameter<bool>("dfs_prefer_highest_openness", true);
     goal_accept_radius_m_ = declare_parameter<double>("goal_accept_radius_m", 1.0);
+    discrete_goal_tol_m_ = declare_parameter<double>(
+      "discrete_goal_tol_m", std::max(0.35, goal_accept_radius_m_ * 0.4));
     parent_to_nearest_node_ = declare_parameter<bool>("parent_to_nearest_node", true);
     early_nav_min_score_ = declare_parameter<int>("early_nav_min_score", 3);
     return_home_max_attempts_ = declare_parameter<int>("return_home_max_attempts", 20);
@@ -129,6 +134,9 @@ public:
     grid_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
       "/grid_map", rclcpp::QoS(1),
       std::bind(&ExploreNode::gridCb, this, std::placeholders::_1));
+    costmap_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
+      "/global_costmap/costmap", rclcpp::QoS(1),
+      std::bind(&ExploreNode::costmapCb, this, std::placeholders::_1));
 
     vlm_scores_sub_ = create_subscription<explorer_msgs::msg::FrontierOpennessScores>(
       "exploration/vlm/scores", rclcpp::QoS(1),
@@ -145,6 +153,8 @@ public:
       "exploration/brain/graph_edges", latched);
     vlm_choice_pub_ = create_publisher<explorer_msgs::msg::VlmChoiceEvent>(
       "exploration/vlm/choice", latched);
+    nav_fail_pub_ = create_publisher<explorer_msgs::msg::NavFailEvent>(
+      "exploration/nav_fail", latched);
     vlm_views_pub_ = create_publisher<explorer_msgs::msg::FrontierViews>(
       "exploration/vlm/views", rclcpp::QoS(1));
 
@@ -273,6 +283,23 @@ public:
       publishPendingBrainTelemetry();
 
       if (decision.action == explorer_mission::BrainAction::kComplete) {
+        updateRobotPoseFromTf();
+        const bool start_ok = explorer_mission::isStartClearanceOk(
+          currentClearanceM(), unstick_min_clearance_m_);
+        if (!explorer_mission::shouldAcceptBrainComplete(start_ok)) {
+          // Soft-skips emptied live_ while still wedged — not a real success.
+          RCLCPP_ERROR(
+            get_logger(),
+            "Brain complete while wedged (clearance=%.3f) — terminating stuck "
+            "(avoid fake success after soft-skips)",
+            currentClearanceM());
+          publishPhase(
+            "complete", statusNodeId(), 0, true,
+            "stuck: wedged with no reachable live frontiers",
+            explorer_mission::terminationReasonCStr(
+              explorer_mission::TerminationReason::kStuck));
+          break;
+        }
         publishPhase(
           "complete", statusNodeId(), 0, true, decision.detail,
           explorer_mission::terminationReasonCStr(
@@ -305,7 +332,7 @@ public:
         "navigating", from_id, decision.goal_id, false, decision.detail);
 
       const auto nav = navigateNewGoalWithRecovery(
-        decision.goal, decision.goal, from_id);
+        decision.goal_id, decision.goal, decision.goal, from_id);
       if (nav.terminate_stuck) {
         publishPhase(
           "complete", statusNodeId(), decision.goal_id, true,
@@ -345,6 +372,13 @@ private:
     std::lock_guard<std::mutex> lock(grid_mutex_);
     latest_grid_ = *msg;
     have_grid_ = true;
+  }
+
+  void costmapCb(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
+  {
+    std::lock_guard<std::mutex> lock(costmap_mutex_);
+    latest_costmap_ = *msg;
+    have_costmap_ = true;
   }
 
   void vlmScoresCb(const explorer_msgs::msg::FrontierOpennessScores::SharedPtr msg)
@@ -486,6 +520,7 @@ private:
     if (!brain_decision_pub_ || !brain_) {
       return;
     }
+    updateRobotPoseFromTf();
     explorer_msgs::msg::BrainDecisionEvent msg;
     msg.header.stamp = now();
     msg.header.frame_id = map_frame_;
@@ -508,7 +543,92 @@ private:
     msg.detail = decision.detail;
     msg.visited_ids = brain_->visitedIds();
     msg.live_ids = brain_->liveFrontierIds();
+    msg.robot_x = current_pos_.x;
+    msg.robot_y = current_pos_.y;
+    msg.goal_distance_m = static_cast<float>(
+      explorer_mission::euclideanDist(current_pos_, decision.goal));
     brain_decision_pub_->publish(msg);
+  }
+
+  void publishNavFailEvent(
+    const std::string & stage,
+    const std::string & fail_class,
+    const std::string & resolution,
+    uint32_t goal_id,
+    const cv::Point2f & goal_pos,
+    uint32_t prior_id,
+    double nav_dt_s,
+    uint16_t nav_error_code,
+    const std::string & nav_error,
+    bool prior_pose_known,
+    bool prior_plan_ok,
+    bool new_goal_plan_ok,
+    uint16_t new_plan_code,
+    const std::string & new_plan_err,
+    bool definitive_unreachable,
+    double start_clearance_m,
+    bool start_clearance_ok)
+  {
+    if (!nav_fail_pub_) {
+      return;
+    }
+    updateRobotPoseFromTf();
+    explorer_msgs::msg::NavFailEvent msg;
+    msg.header.stamp = now();
+    msg.header.frame_id = map_frame_;
+    msg.stage = stage;
+    msg.fail_class = fail_class;
+    msg.resolution = resolution;
+    msg.goal_id = goal_id;
+    msg.goal_x = goal_pos.x;
+    msg.goal_y = goal_pos.y;
+    msg.prior_id = prior_id;
+    msg.robot_x = current_pos_.x;
+    msg.robot_y = current_pos_.y;
+    msg.nav_dt_s = static_cast<float>(nav_dt_s);
+    msg.nav_error_code = nav_error_code;
+    msg.nav_error = nav_error;
+    msg.prior_pose_known = prior_pose_known;
+    msg.prior_plan_ok = prior_plan_ok;
+    msg.new_goal_plan_ok = new_goal_plan_ok;
+    msg.new_plan_code = new_plan_code;
+    msg.new_plan_err = new_plan_err;
+    msg.definitive_unreachable = definitive_unreachable;
+    msg.start_clearance_m = static_cast<float>(start_clearance_m);
+    msg.start_clearance_ok = start_clearance_ok;
+    msg.grid_occ_at_robot = sampleLatestGridOcc(current_pos_.x, current_pos_.y);
+    msg.grid_occ_at_goal = sampleLatestGridOcc(goal_pos.x, goal_pos.y);
+    msg.costmap_at_robot = sampleLatestCostmap(current_pos_.x, current_pos_.y);
+    msg.costmap_at_goal = sampleLatestCostmap(goal_pos.x, goal_pos.y);
+    nav_fail_pub_->publish(msg);
+  }
+
+  int8_t sampleLatestGridOcc(double x_m, double y_m)
+  {
+    nav_msgs::msg::OccupancyGrid grid;
+    {
+      std::lock_guard<std::mutex> lock(grid_mutex_);
+      if (!have_grid_) {
+        return static_cast<int8_t>(-128);
+      }
+      grid = latest_grid_;
+    }
+    const auto v = explorer_mission::sampleGridAtWorld(grid, x_m, y_m);
+    return v.has_value() ? *v : static_cast<int8_t>(-128);
+  }
+
+  int16_t sampleLatestCostmap(double x_m, double y_m)
+  {
+    nav_msgs::msg::OccupancyGrid costmap;
+    {
+      std::lock_guard<std::mutex> lock(costmap_mutex_);
+      if (!have_costmap_) {
+        return static_cast<int16_t>(-1);
+      }
+      costmap = latest_costmap_;
+    }
+    const auto v = explorer_mission::sampleGridAtWorld(costmap, x_m, y_m);
+    return v.has_value() ? static_cast<int16_t>(*v) : static_cast<int16_t>(-1);
   }
 
   void publishPhase(
@@ -581,6 +701,8 @@ private:
     std::vector<explorer_mission::FrontierCandidate> candidates;
     candidates.reserve(contours.size());
     uint32_t greedy_id_base = greedy_detect_key_ + 1;
+    double inset_sum_m = 0.0;
+    size_t inset_moved = 0;
     for (size_t i = 0; i < contours.size(); ++i) {
       const cv::Point2f midpoint =
         explorer_mission::frontierMidpointWorld(contours[i], grid);
@@ -588,12 +710,23 @@ private:
       constexpr double kFrontierGoalInsetM = 0.35;
       const cv::Point2f goal = explorer_mission::insetFrontierGoalWorld(
         grid, midpoint, kFrontierGoalInsetM);
+      const double inset_applied =
+        explorer_mission::euclideanDist(midpoint, goal);
+      inset_sum_m += inset_applied;
+      if (inset_applied > 1e-4) {
+        ++inset_moved;
+      }
       explorer_mission::FrontierCandidate c;
       // Tree brain ignores id; greedy needs stable ids within this detect batch.
       c.id = brain_->usesFrontierTree() ? 0u : (greedy_id_base + static_cast<uint32_t>(i));
       c.position = goal;
       candidates.push_back(c);
     }
+    RCLCPP_INFO(
+      get_logger(),
+      "Frontier goals: n=%zu inset_moved=%zu inset_mean_m=%.3f",
+      candidates.size(), inset_moved,
+      candidates.empty() ? 0.0 : inset_sum_m / static_cast<double>(candidates.size()));
 
     const std::vector<uint32_t> new_ids = brain_->onFrontiersDetected(candidates);
     publishTree();
@@ -919,6 +1052,49 @@ private:
       static_cast<double>(current_pos_.y - pose.y)) <= goal_accept_radius_m_;
   }
 
+  bool hasAlternateScanPose(uint32_t exclude_id) const
+  {
+    for (const auto & entry : scan_poses_) {
+      if (entry.first == exclude_id) {
+        continue;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /// After return-to-prior fails, try other visited scan poses (nearest first).
+  bool navigateToAlternateScanPose(uint32_t exclude_id)
+  {
+    updateRobotPoseFromTf();
+    std::vector<std::pair<double, cv::Point2f>> candidates;
+    candidates.reserve(scan_poses_.size());
+    for (const auto & entry : scan_poses_) {
+      if (entry.first == exclude_id) {
+        continue;
+      }
+      const double d = std::hypot(
+        static_cast<double>(current_pos_.x - entry.second.x),
+        static_cast<double>(current_pos_.y - entry.second.y));
+      candidates.emplace_back(d, entry.second);
+    }
+    std::sort(candidates.begin(), candidates.end(),
+      [](const auto & a, const auto & b) {return a.first < b.first;});
+    for (const auto & c : candidates) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Stuck recovery: trying alternate sanctuary at (%.2f, %.2f) dist=%.2f",
+        c.second.x, c.second.y, c.first);
+      if (navigateToPosition(c.second, c.second)) {
+        return true;
+      }
+      if (nearPose(c.second)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   bool theoreticalPlanTo(const cv::Point2f & pose)
   {
     updateRobotPoseFromTf();
@@ -929,12 +1105,32 @@ private:
       return nav2_navigator_->computePathExists(
         pose.x, pose.y, 0.0, map_frame_, 15.0);
     }
-    // Discrete mode: straight-line plan always "exists" geometrically.
-    return true;
+    nav_msgs::msg::OccupancyGrid grid;
+    {
+      std::lock_guard<std::mutex> lock(grid_mutex_);
+      if (!have_grid_) {
+        // No map yet — cannot claim a discrete path exists.
+        return false;
+      }
+      grid = latest_grid_;
+    }
+    return explorer_mission::discretePathExists(
+      grid, current_pos_.x, current_pos_.y, current_yaw_deg_,
+      pose.x, pose.y, makeDiscreteNavConfig());
+  }
+
+  explorer_mission::DiscreteNavConfig makeDiscreteNavConfig() const
+  {
+    explorer_mission::DiscreteNavConfig cfg;
+    cfg.robot_radius_m = discrete_robot_radius_m_;
+    cfg.goal_tol_m = discrete_goal_tol_m_;
+    cfg.allow_unknown = discrete_allow_unknown_;
+    return cfg;
   }
 
   /// NEW-frontier nav fail policy: inaccessible vs stuck recovery.
   NavAttemptResult navigateNewGoalWithRecovery(
+    uint32_t goal_id,
     const cv::Point2f & goal_pos,
     const cv::Point2f & look_at,
     uint32_t prior_id)
@@ -969,7 +1165,22 @@ private:
       new_plan_code = nav2_navigator_->lastErrorCode();
       new_plan_err = nav2_navigator_->lastError();
     } else {
-      new_goal_plan_ok = true;
+      nav_msgs::msg::OccupancyGrid grid;
+      {
+        std::lock_guard<std::mutex> lock(grid_mutex_);
+        if (have_grid_) {
+          grid = latest_grid_;
+        }
+      }
+      new_goal_plan_ok = !grid.data.empty() && explorer_mission::discretePathExists(
+        grid, current_pos_.x, current_pos_.y, current_yaw_deg_,
+        goal_pos.x, goal_pos.y, makeDiscreteNavConfig());
+      if (!new_goal_plan_ok) {
+        new_plan_code = explorer_mission::kComputePathNoValidPath;
+        new_plan_err = grid.data.empty()
+          ? "discrete: no occupancy grid"
+          : "discrete: no lattice path";
+      }
     }
     const bool new_unreachable_definitive =
       !new_goal_plan_ok &&
@@ -993,7 +1204,16 @@ private:
 
     const auto fail_class = explorer_mission::classifyNewGoalNavFailure(
       prior_known, prior_plan_ok, new_goal_plan_ok, new_unreachable_definitive,
-      start_ok);
+      start_ok, nav_substantive);
+    const std::string fail_class_s =
+      explorer_mission::newGoalFailClassCStr(fail_class);
+
+    publishNavFailEvent(
+      "classified", fail_class_s, "",
+      goal_id, goal_pos, prior_id,
+      nav_dt_s, nav_error_code, nav_error,
+      prior_known, prior_plan_ok, new_goal_plan_ok, new_plan_code, new_plan_err,
+      new_unreachable_definitive, start_clearance, start_ok);
 
     if (fail_class == explorer_mission::NewGoalFailClass::kInaccessible) {
       RCLCPP_WARN(
@@ -1001,6 +1221,12 @@ private:
         "NEW frontier definitively unplannable (code=%u) and prior %u reachable "
         "(nav_dt=%.2fs start_ok) — mark inaccessible (no thrash)",
         static_cast<unsigned>(new_plan_code), prior_id, nav_dt_s);
+      publishNavFailEvent(
+        "resolved", fail_class_s, "mark_dead",
+        goal_id, goal_pos, prior_id,
+        nav_dt_s, nav_error_code, nav_error,
+        prior_known, prior_plan_ok, new_goal_plan_ok, new_plan_code, new_plan_err,
+        new_unreachable_definitive, start_clearance, start_ok);
       return NavAttemptResult{false, true, false};
     }
 
@@ -1028,16 +1254,46 @@ private:
         back_ok = navigateToPosition(prior_pose, prior_pose);
       }
     }
+    // Prefer any other visited scan pose over ending the episode.
+    if (!back_ok) {
+      back_ok = navigateToAlternateScanPose(prior_id);
+    }
     applyCostmapInflation(nav2_inflation_radius_m_, mapper_inflation_m_);
     updateRobotPoseFromTf();
-    if (!back_ok && nearPose(prior_pose)) {
+    // nearPose alone is not a successful return if still wedged — that short-circuit
+    // caused seed0 to "return", retry the bad NEW goal, then terminate_stuck.
+    if (!back_ok && nearPose(prior_pose) &&
+      explorer_mission::isStartClearanceOk(
+        currentClearanceM(), unstick_min_clearance_m_))
+    {
       back_ok = true;
     }
     if (!back_ok) {
+      // Never terminate here. Mark NEW dead only if start is clear; otherwise
+      // soft-skip (onNavFailed mark_dead=false drops from live, not geographic dead_).
+      (void)hasAlternateScanPose(prior_id);
+      updateRobotPoseFromTf();
+      const double clearance_after = currentClearanceM();
+      const bool start_ok_after = explorer_mission::isStartClearanceOk(
+        clearance_after, unstick_min_clearance_m_);
+      const bool mark_dead =
+        explorer_mission::shouldMarkDeadAfterStuckRecovery(start_ok_after);
+      const char * resolution = mark_dead
+        ? "recovery_failed_mark_dead"
+        : "recovery_failed_soft_skip";
       RCLCPP_ERROR(
         get_logger(),
-        "Stuck recovery failed: cannot return to prior node %u", prior_id);
-      return NavAttemptResult{false, false, true};
+        "Stuck recovery failed: cannot return to prior %u; %s "
+        "(start_ok=%d clearance=%.3f)",
+        prior_id, resolution,
+        static_cast<int>(start_ok_after), clearance_after);
+      publishNavFailEvent(
+        "resolved", fail_class_s, resolution,
+        goal_id, goal_pos, prior_id,
+        nav_dt_s, nav_error_code, nav_error,
+        prior_known, prior_plan_ok, new_goal_plan_ok, new_plan_code, new_plan_err,
+        new_unreachable_definitive, clearance_after, start_ok_after);
+      return NavAttemptResult{false, mark_dead, false};
     }
 
     RCLCPP_INFO(
@@ -1045,22 +1301,42 @@ private:
       "Returned to prior %u; retrying NEW frontier with normal inflation",
       prior_id);
     if (navigateToPosition(goal_pos, look_at)) {
+      publishNavFailEvent(
+        "resolved", fail_class_s, "recovered",
+        goal_id, goal_pos, prior_id,
+        nav_dt_s, nav_error_code, nav_error,
+        prior_known, prior_plan_ok, new_goal_plan_ok, new_plan_code, new_plan_err,
+        new_unreachable_definitive, currentClearanceM(),
+        explorer_mission::isStartClearanceOk(
+          currentClearanceM(), unstick_min_clearance_m_));
       return NavAttemptResult{true, false, false};
     }
     updateRobotPoseFromTf();
+    const double clearance_after = currentClearanceM();
     const bool start_ok_after = explorer_mission::isStartClearanceOk(
-      currentClearanceM(), unstick_min_clearance_m_);
-    if (!explorer_mission::shouldMarkDeadAfterStuckRecovery(start_ok_after)) {
-      RCLCPP_ERROR(
-        get_logger(),
-        "Still wedged after stuck recovery (clearance low) — ending episode stuck "
-        "instead of blacklisting remaining frontiers");
-      return NavAttemptResult{false, false, true};
-    }
+      clearance_after, unstick_min_clearance_m_);
+    const bool mark_dead =
+      explorer_mission::shouldMarkDeadAfterStuckRecovery(start_ok_after);
+    // Still wedged: soft-skip this goal (mark_dead=false → erase live only).
+    // Cap is 1 attempt — never leave the same goal live (seed1 31 min loop).
+    const char * resolution = mark_dead
+      ? "retry_failed_mark_dead"
+      : (explorer_mission::shouldSoftSkipWedgedGoal(1)
+           ? "wedged_soft_skip"
+           : "wedged_keep_live");
     RCLCPP_WARN(
       get_logger(),
-      "NEW frontier still unreachable after unstuck (start clear) — marking dead");
-    return NavAttemptResult{false, true, false};
+      "NEW frontier still unreachable after unstuck (start_ok=%d clearance=%.3f) "
+      "%s mark_dead=%d",
+      static_cast<int>(start_ok_after), clearance_after, resolution,
+      static_cast<int>(mark_dead));
+    publishNavFailEvent(
+      "resolved", fail_class_s, resolution,
+      goal_id, goal_pos, prior_id,
+      nav_dt_s, nav_error_code, nav_error,
+      prior_known, prior_plan_ok, new_goal_plan_ok, new_plan_code, new_plan_err,
+      new_unreachable_definitive, clearance_after, start_ok_after);
+    return NavAttemptResult{false, mark_dead, false};
   }
 
   double currentClearanceM()
@@ -1276,10 +1552,31 @@ private:
       return ok;
     }
 
-    const auto plan = explorer_mission::planToPose(
-      current_pos_.x, current_pos_.y, current_yaw_deg_,
-      goal_x, goal_y, goal_yaw_deg);
-    return executeDiscretePlan(plan);
+    // Discrete lattice navigation (hexapod-faithful): plan in DiscreteMove space.
+    nav_msgs::msg::OccupancyGrid grid;
+    {
+      std::lock_guard<std::mutex> lock(grid_mutex_);
+      if (!have_grid_) {
+        RCLCPP_WARN(get_logger(), "Discrete nav: no /grid_map yet");
+        return false;
+      }
+      grid = latest_grid_;
+    }
+    const auto planned = explorer_mission::planOnOccupancy(
+      grid, current_pos_.x, current_pos_.y, current_yaw_deg_,
+      goal_x, goal_y, goal_yaw_deg, makeDiscreteNavConfig());
+    if (!planned.ok) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Discrete lattice plan failed to (%.2f, %.2f) expansions=%zu",
+        goal_x, goal_y, planned.expansions);
+      return false;
+    }
+    RCLCPP_INFO(
+      get_logger(),
+      "Discrete lattice plan: %zu batches, %zu expansions -> (%.2f, %.2f)",
+      planned.steps.size(), planned.expansions, goal_x, goal_y);
+    return executeDiscretePlan(planned.steps);
   }
 
   bool executeDiscretePlan(const std::vector<explorer_mission::NavigationStep> & plan)
@@ -1319,7 +1616,10 @@ private:
 
   std::string map_frame_;
   std::string base_frame_;
-  std::string navigation_mode_{"nav2"};
+  std::string navigation_mode_{"discrete"};
+  double discrete_robot_radius_m_{0.20};
+  double discrete_goal_tol_m_{0.40};
+  bool discrete_allow_unknown_{true};
   double frontier_detection_radius_{50.0};
   double frontier_exclusion_radius_{1.0};
   int min_contour_pixels_{15};
@@ -1360,11 +1660,16 @@ private:
   nav_msgs::msg::OccupancyGrid latest_grid_;
   bool have_grid_{false};
 
+  std::mutex costmap_mutex_;
+  nav_msgs::msg::OccupancyGrid latest_costmap_;
+  bool have_costmap_{false};
+
   std::mutex scores_mutex_;
   explorer_msgs::msg::FrontierOpennessScores latest_scores_;
   bool scores_received_{false};
 
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr grid_sub_;
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_sub_;
   rclcpp::Subscription<explorer_msgs::msg::FrontierOpennessScores>::SharedPtr vlm_scores_sub_;
 
   rclcpp::Publisher<explorer_msgs::msg::FrontierTree>::SharedPtr tree_pub_;
@@ -1372,6 +1677,7 @@ private:
   rclcpp::Publisher<explorer_msgs::msg::BrainDecisionEvent>::SharedPtr brain_decision_pub_;
   rclcpp::Publisher<explorer_msgs::msg::BrainGraphEdges>::SharedPtr brain_graph_edges_pub_;
   rclcpp::Publisher<explorer_msgs::msg::VlmChoiceEvent>::SharedPtr vlm_choice_pub_;
+  rclcpp::Publisher<explorer_msgs::msg::NavFailEvent>::SharedPtr nav_fail_pub_;
   rclcpp::Publisher<explorer_msgs::msg::FrontierViews>::SharedPtr vlm_views_pub_;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr debug_events_pub_;
   rclcpp::Publisher<explorer_msgs::msg::FrontierViews>::SharedPtr debug_vlm_batch_pub_;

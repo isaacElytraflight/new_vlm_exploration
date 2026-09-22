@@ -564,11 +564,25 @@ If approved, these changes are strictly non-behavior-changing:
 
 ### 6.2 Debug Logging (Optional PR)
 Add ROS_INFO logs without changing control flow:
-- Log frontier inset distance in `insetFrontierGoalWorld()`
-- Log costmap cell values at goal position in `navigateNewGoalWithRecovery()`
-- Log number of frontiers replaced vs retained in `onFrontiersDetected()`
+- [x] Log frontier inset distance stats in `detectAndOfferToBrain()`
+- [x] Publish `exploration/nav_fail` (NavFailEvent) with grid/costmap samples at failure
+- [x] Enrich `BrainDecisionEvent` with robot pose + goal distance
+- [x] Capture nav_fail in `experiment_event_logger` → `events.jsonl`
 
-These would be guarded by `publish_debug_topics_` parameter.
+---
+
+## 7. Findings from `ablation_run_20260915_200851` (instrumented)
+
+### 7.1 Headline
+Both greedy seeds ended `termination_reason=stuck` / `cannot return to previous node` (cov 68% / 83%). Event logger worked; every `nav_fail` used Nav2 code **208**.
+
+### 7.2 Death-corner resurrection (FIXED in greedy)
+Pose **(-0.55, -3.45)** appears from the first detect and is re-issued under new ids after `mark_dead` (seed1: 28 → 34 → 35 → 36). Cause: greedy id churn + id-only `dead_`. Fix: geographic dead-pose radius in `GreedyNearestBrain::onFrontiersDetected`.
+
+### 7.3 Return-to-prior episode killer (FIXED 2026-09-20)
+When clearance &lt; 0.25m, policy chose thrash even for **instant** (~30ms) 208 rejects; thrash often worsened the wedge → `terminate_stuck` with live frontiers left.
+
+**Fix:** Non-substantive definitive rejects → `kInaccessible` (mark dead, no thrash) when prior is OK. If thrash still runs and return-to-prior fails: try other scan-pose sanctuaries; else mark dead and continue when alternates existed (terminate only with no alternate sanctuary).
 
 ---
 

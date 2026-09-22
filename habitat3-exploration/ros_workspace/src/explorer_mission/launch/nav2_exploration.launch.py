@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Exploration stack: privileged pose + sensor occupancy + Nav2 (no slam_toolbox)."""
+"""Exploration stack: privileged pose + sensor occupancy.
+
+Default navigation_mode:=discrete plans in DiscreteMove lattice space (hexapod-
+faithful). Set navigation_mode:=nav2 to restore Nav2 + cmd_vel quantization.
+"""
 
 import os
 
@@ -8,7 +12,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
@@ -23,6 +27,7 @@ def generate_launch_description() -> LaunchDescription:
     navigation_mode = LaunchConfiguration("navigation_mode")
     frontiers_grid_topic = LaunchConfiguration("frontiers_grid_topic")
     brain_id = LaunchConfiguration("brain_id")
+    use_nav2 = PythonExpression(["'", navigation_mode, "' == 'nav2'"])
 
     exploration_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
@@ -59,10 +64,10 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("use_privileged_map", default_value="false"),
         DeclareLaunchArgument("use_pc_mapper", default_value="true"),
         DeclareLaunchArgument("realtime_mode", default_value="false"),
-        DeclareLaunchArgument("navigation_mode", default_value="nav2"),
+        DeclareLaunchArgument("navigation_mode", default_value="discrete"),
         DeclareLaunchArgument(
             "frontiers_grid_topic",
-            default_value="/global_costmap/costmap",
+            default_value="/grid_map",
         ),
         DeclareLaunchArgument("brain_id", default_value="vlm_tree_dfs"),
 
@@ -162,15 +167,18 @@ def generate_launch_description() -> LaunchDescription:
             output="screen",
         ),
 
+        # Nav2 + cmd_vel bridge only when explicitly requested.
         TimerAction(
             period=5.0,
             actions=[nav2_navigation],
+            condition=IfCondition(use_nav2),
         ),
 
         Node(
             package="explorer_bridge",
             executable="cmd_vel_to_discrete_node",
             name="cmd_vel_to_discrete",
+            condition=IfCondition(use_nav2),
             parameters=[{
                 "realtime_mode": realtime_mode,
                 "realtime_max_linear_m_s": 0.1,

@@ -34,6 +34,25 @@ float euclidean(const cv::Point2f & a, const cv::Point2f & b)
   return std::sqrt(dx * dx + dy * dy);
 }
 
+bool poseNearAny(
+  const cv::Point2f & pose,
+  const std::vector<cv::Point2f> & centers,
+  float radius_m)
+{
+  if (radius_m <= 0.0f || centers.empty()) {
+    return false;
+  }
+  const float r2 = radius_m * radius_m;
+  for (const auto & c : centers) {
+    const float dx = pose.x - c.x;
+    const float dy = pose.y - c.y;
+    if (dx * dx + dy * dy <= r2) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /// Flat frontier graph with Euclidean kNN edges (Nav2-cost proxy for v1).
 class FrontierGraphMemory
 {
@@ -61,8 +80,18 @@ public:
 
   std::vector<uint32_t> addFrontiers(
     const std::vector<FrontierCandidate> & frontiers,
-    int knn)
+    int knn,
+    float dead_pose_radius_m = 1.0f)
   {
+    std::vector<cv::Point2f> dead_poses;
+    dead_poses.reserve(dead_.size());
+    for (const uint32_t id : dead_) {
+      const auto it = nodes_.find(id);
+      if (it != nodes_.end()) {
+        dead_poses.push_back(it->second);
+      }
+    }
+
     std::vector<uint32_t> new_ids;
     for (const auto & f : frontiers) {
       const uint32_t id = (f.id != 0) ? f.id : next_id_++;
@@ -70,6 +99,9 @@ public:
         next_id_ = std::max(next_id_, f.id + 1);
       }
       if (visited_.count(id) || dead_.count(id)) {
+        continue;
+      }
+      if (poseNearAny(f.position, dead_poses, dead_pose_radius_m)) {
         continue;
       }
       nodes_[id] = f.position;
@@ -352,7 +384,20 @@ public:
   {
     last_new_child_ids_.clear();
     const std::vector<uint32_t> parent_pool = tree_.allNodeIds();
+    std::vector<cv::Point2f> dead_poses;
+    for (uint32_t id : parent_pool) {
+      if (!tree_.isDead(id)) {
+        continue;
+      }
+      const TreeNode * n = tree_.find(id);
+      if (n) {
+        dead_poses.push_back(n->position);
+      }
+    }
     for (const auto & f : frontiers) {
+      if (poseNearAny(f.position, dead_poses, config_.dead_pose_radius_m)) {
+        continue;
+      }
       const uint32_t parent_id = tree_.resolveFrontierParentId(
         config_.parent_to_nearest_node, tree_.currentNodeId(), f.position, &parent_pool);
       const uint32_t child_id = tree_.addChild(
@@ -479,9 +524,14 @@ private:
 class GreedyNearestBrain final : public ExplorationBrain
 {
 public:
+  explicit GreedyNearestBrain(const ExplorationBrainConfig & config = {})
+  : config_(config) {}
+
   std::string id() const override {return "greedy_nearest";}
   bool wantsVlmScores() const override {return false;}
   bool usesFrontierTree() const override {return false;}
+
+  void setConfig(const ExplorationBrainConfig & config) override {config_ = config;}
 
   std::vector<uint32_t> visitedIds() const override
   {
@@ -547,6 +597,10 @@ public:
       if (visited_.count(f.id) || dead_.count(f.id)) {
         continue;
       }
+      // Id churn each detect: also reject poses near previously dead goals.
+      if (nearDeadPose(f.position)) {
+        continue;
+      }
       live_.push_back(f);
       poses_[f.id] = f.position;
       accepted.push_back(f.id);
@@ -574,8 +628,10 @@ public:
           break;
         }
       }
-      eraseLive(goal_id);
     }
+    // Soft-skip (mark_dead=false) still drops from live so greedy can try
+    // another frontier. Leaving it live caused a 31 min loop on one goal.
+    eraseLive(goal_id);
   }
 
   BrainDecision selectNextGoal(const BrainContext & ctx) override
@@ -619,6 +675,20 @@ private:
       live_.end());
   }
 
+  bool nearDeadPose(const cv::Point2f & pose) const
+  {
+    std::vector<cv::Point2f> dead_poses;
+    dead_poses.reserve(dead_.size());
+    for (const uint32_t id : dead_) {
+      const auto it = poses_.find(id);
+      if (it != poses_.end()) {
+        dead_poses.push_back(it->second);
+      }
+    }
+    return poseNearAny(pose, dead_poses, config_.dead_pose_radius_m);
+  }
+
+  ExplorationBrainConfig config_;
   std::vector<FrontierCandidate> live_;
   std::unordered_set<uint32_t> visited_;
   std::unordered_set<uint32_t> dead_;
@@ -666,7 +736,7 @@ public:
   std::vector<uint32_t> onFrontiersDetected(
     const std::vector<FrontierCandidate> & frontiers) override
   {
-    last_new_ids_ = graph_.addFrontiers(frontiers, config_.graph_knn);
+    last_new_ids_ = graph_.addFrontiers(frontiers, config_.graph_knn, config_.dead_pose_radius_m);
     pending_edges_ = graph_.edges();
     return last_new_ids_;
   }
@@ -823,7 +893,7 @@ public:
   std::vector<uint32_t> onFrontiersDetected(
     const std::vector<FrontierCandidate> & frontiers) override
   {
-    last_new_ids_ = graph_.addFrontiers(frontiers, config_.graph_knn);
+    last_new_ids_ = graph_.addFrontiers(frontiers, config_.graph_knn, config_.dead_pose_radius_m);
     pending_edges_ = graph_.edges();
     return last_new_ids_;
   }
@@ -976,7 +1046,7 @@ std::unique_ptr<ExplorationBrain> createExplorationBrain(
     return std::make_unique<VlmTreeDfsBrain>(config);
   }
   if (brain_id == "greedy_nearest") {
-    return std::make_unique<GreedyNearestBrain>();
+    return std::make_unique<GreedyNearestBrain>(config);
   }
   if (brain_id == "vlm_frontier_graph") {
     return std::make_unique<VlmFrontierGraphBrain>(config);

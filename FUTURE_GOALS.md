@@ -52,7 +52,7 @@ Ablation metrics remain **unreliable for claiming navigation quality**. Treat hi
 4. **Costmap / start clearance sensitivity.** Inflation vs `robot_radius`, frontier goals on free↔unknown edges, and Habitat `collided=True` during DiscreteMove interact; wedged starts make every NEW goal look like `NO_VALID_PATH`.
 5. **Goal C debt unchanged:** graph edges are Euclidean kNN, not Nav2 path cost; choice brain is score-argmax stand-in, not true multi-image VLM choice.
 
-**Open priority:** fix path following until corner follow is visibly sane, *then* revisit recovery aggressiveness — do not pile more blacklist heuristics on a wedged robot.
+**Open priority:** discrete lattice nav is now the default (`discrete-lattice-nav` branch). Re-verify corner follow visually; only then revisit recovery aggressiveness.
 
 ---
 

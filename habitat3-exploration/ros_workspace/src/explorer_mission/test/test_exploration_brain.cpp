@@ -14,6 +14,7 @@ using explorer_mission::BrainContext;
 using explorer_mission::ExplorationBrain;
 using explorer_mission::ExplorationBrainConfig;
 using explorer_mission::FrontierCandidate;
+using explorer_mission::TreeNode;
 using explorer_mission::createExplorationBrain;
 
 TEST(ExplorationBrainHarness, RunnerExecutesAssertions)
@@ -365,6 +366,87 @@ TEST(GreedyNearestBrain, VisitedAndLiveSnapshots_Positive)
   EXPECT_EQ(visited[0], 1u);
 }
 
+TEST(GreedyNearestBrain, MarkDeadBlocksSamePoseWithNewId_Positive)
+{
+  // Ablation evidence: greedy mints fresh ids each detect, so id-only dead_
+  // lets the same corner pose resurrect (e.g. (-0.55,-3.45) as 28 → 34 → 36).
+  auto brain = createExplorationBrain("greedy_nearest");
+  brain->onEpisodeStart(cv::Point2f(0.f, 0.f));
+  brain->onFrontiersDetected({
+    FrontierCandidate{28u, cv::Point2f(-0.55f, -3.45f)},
+    FrontierCandidate{29u, cv::Point2f(2.0f, 0.0f)},
+  });
+  brain->onNavFailed(28u, true);
+  EXPECT_TRUE(brain->isDead(28u));
+
+  const auto accepted = brain->onFrontiersDetected({
+    FrontierCandidate{34u, cv::Point2f(-0.55f, -3.45f)},  // same pose, new id
+    FrontierCandidate{35u, cv::Point2f(2.1f, 0.1f)},
+  });
+  EXPECT_EQ(accepted.size(), 1u);
+  EXPECT_EQ(accepted[0], 35u);
+  EXPECT_FALSE(brain->isDead(34u));  // never accepted
+  const auto live = brain->liveFrontierIds();
+  ASSERT_EQ(live.size(), 1u);
+  EXPECT_EQ(live[0], 35u);
+}
+
+TEST(GreedyNearestBrain, MarkDeadAllowsFarPoseWithNewId_Negative)
+{
+  auto brain = createExplorationBrain("greedy_nearest");
+  brain->onEpisodeStart(cv::Point2f(0.f, 0.f));
+  brain->onFrontiersDetected({
+    FrontierCandidate{1u, cv::Point2f(0.f, 0.f)},
+  });
+  brain->onNavFailed(1u, true);
+
+  const auto accepted = brain->onFrontiersDetected({
+    FrontierCandidate{2u, cv::Point2f(5.0f, 0.0f)},  // far from dead pose
+  });
+  ASSERT_EQ(accepted.size(), 1u);
+  EXPECT_EQ(accepted[0], 2u);
+}
+
+TEST(VlmTreeDfsBrain, MarkDeadBlocksSamePoseWithNewChild_Positive)
+{
+  auto brain = createExplorationBrain("vlm_tree_dfs");
+  brain->onEpisodeStart(cv::Point2f(0.f, 0.f));
+  const auto first = brain->onFrontiersDetected({
+    FrontierCandidate{0u, cv::Point2f(-0.55f, -3.45f)},
+  });
+  ASSERT_EQ(first.size(), 1u);
+  brain->onNavFailed(first[0], true);
+  EXPECT_TRUE(brain->isDead(first[0]));
+
+  const auto second = brain->onFrontiersDetected({
+    FrontierCandidate{0u, cv::Point2f(-0.55f, -3.45f)},
+    FrontierCandidate{0u, cv::Point2f(3.0f, 0.0f)},
+  });
+  ASSERT_EQ(second.size(), 1u);
+  const TreeNode * kept = brain->frontierTree()->find(second[0]);
+  ASSERT_NE(kept, nullptr);
+  EXPECT_GT(kept->position.x, 1.0f);
+}
+
+TEST(VlmFrontierGraphBrain, MarkDeadBlocksSamePoseWithNewId_Positive)
+{
+  auto brain = createExplorationBrain("vlm_frontier_graph");
+  brain->onEpisodeStart(cv::Point2f(0.f, 0.f));
+  const auto first = brain->onFrontiersDetected({
+    FrontierCandidate{10u, cv::Point2f(-0.55f, -3.45f)},
+    FrontierCandidate{11u, cv::Point2f(2.0f, 0.0f)},
+  });
+  ASSERT_EQ(first.size(), 2u);
+  brain->onNavFailed(10u, true);
+
+  const auto second = brain->onFrontiersDetected({
+    FrontierCandidate{20u, cv::Point2f(-0.55f, -3.45f)},
+    FrontierCandidate{21u, cv::Point2f(2.1f, 0.1f)},
+  });
+  ASSERT_EQ(second.size(), 1u);
+  EXPECT_EQ(second[0], 21u);
+}
+
 TEST(VlmFrontierGraphBrain, BuildsKnnEdgesAndPicksHighest_Positive)
 {
   const std::unique_ptr<ExplorationBrain> brain = createExplorationBrain("vlm_frontier_graph");
@@ -516,6 +598,43 @@ TEST(VlmTreeDfsBrain, ArrivalMarksVisitedNotDead_Positive)
   brain->onArrived(ids[0], cv::Point2f(1.f, 0.f));
   EXPECT_TRUE(brain->isVisited(ids[0]));
   EXPECT_FALSE(brain->isDead(ids[0]));
+}
+
+TEST(GreedyNearestBrain, SoftSkipRemovesFromLiveWithoutDead_Positive)
+{
+  // Wedged keep-live left the same nearest goal selected forever (seed1 goal 101).
+  // Soft-skip drops it from live without geographic dead_ so others can be tried.
+  auto brain = createExplorationBrain("greedy_nearest");
+  brain->onEpisodeStart(cv::Point2f(0.f, 0.f));
+  brain->onFrontiersDetected({
+    FrontierCandidate{101u, cv::Point2f(-3.7f, -8.5f)},
+    FrontierCandidate{102u, cv::Point2f(2.0f, 0.0f)},
+  });
+  brain->onNavFailed(101u, /*mark_dead=*/false);
+  EXPECT_FALSE(brain->isDead(101u));
+  const auto live = brain->liveFrontierIds();
+  ASSERT_EQ(live.size(), 1u);
+  EXPECT_EQ(live[0], 102u);
+  const auto next = brain->selectNextGoal(BrainContext{cv::Point2f(-3.7f, -8.5f)});
+  ASSERT_EQ(next.action, BrainAction::kNavigateTo);
+  EXPECT_EQ(next.goal_id, 102u);
+}
+
+TEST(GreedyNearestBrain, SoftSkipAllowsSamePoseOnNextDetect_Negative)
+{
+  auto brain = createExplorationBrain("greedy_nearest");
+  brain->onEpisodeStart(cv::Point2f(0.f, 0.f));
+  brain->onFrontiersDetected({
+    FrontierCandidate{101u, cv::Point2f(-3.7f, -8.5f)},
+  });
+  brain->onNavFailed(101u, /*mark_dead=*/false);
+  EXPECT_TRUE(brain->liveFrontierIds().empty());
+
+  const auto accepted = brain->onFrontiersDetected({
+    FrontierCandidate{201u, cv::Point2f(-3.7f, -8.5f)},
+  });
+  ASSERT_EQ(accepted.size(), 1u);
+  EXPECT_EQ(accepted[0], 201u);
 }
 
 TEST(VlmTreeDfsBrain, NavFailMarksDeadWithoutVisit_Negative)

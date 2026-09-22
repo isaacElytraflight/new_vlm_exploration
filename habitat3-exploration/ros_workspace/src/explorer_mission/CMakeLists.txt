@@ -58,6 +58,7 @@ add_library(discrete_navigator src/discrete_navigator.cpp)
 target_include_directories(discrete_navigator PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
+ament_target_dependencies(discrete_navigator nav_msgs)
 
 add_library(nav2_navigator src/nav2_navigator.cpp)
 target_include_directories(nav2_navigator PUBLIC
@@ -168,6 +169,7 @@ if(BUILD_TESTING)
   ament_add_gtest(test_discrete_navigator test/test_discrete_navigator.cpp)
   target_link_libraries(test_discrete_navigator discrete_navigator)
   target_include_directories(test_discrete_navigator PUBLIC include)
+  ament_target_dependencies(test_discrete_navigator nav_msgs)
 
   ament_add_gtest(test_return_home_guard test/test_return_home_guard.cpp)
   target_include_directories(test_return_home_guard PUBLIC include)

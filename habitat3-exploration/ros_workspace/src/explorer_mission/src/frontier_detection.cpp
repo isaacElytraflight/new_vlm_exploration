@@ -3,6 +3,7 @@
 #include <cstring>
 #include <algorithm>
 #include <cmath>
+#include <optional>
 
 #include <opencv2/imgproc.hpp>
 
@@ -272,6 +273,19 @@ double euclideanDist(const cv::Point2f & a, const cv::Point2f & b)
   const double dx = a.x - b.x;
   const double dy = a.y - b.y;
   return std::sqrt(dx * dx + dy * dy);
+}
+
+std::optional<int8_t> sampleGridAtWorld(
+  const nav_msgs::msg::OccupancyGrid & grid,
+  double x_m,
+  double y_m)
+{
+  int col = 0;
+  int row = 0;
+  if (!worldToGridCell(grid, x_m, y_m, &col, &row)) {
+    return std::nullopt;
+  }
+  return gridOcc(grid, col, row);
 }
 
 std::vector<std::vector<cv::Point>> dedupeContoursByMidpoint(

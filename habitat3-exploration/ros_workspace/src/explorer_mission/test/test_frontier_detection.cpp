@@ -234,6 +234,25 @@ TEST(FrontierInset, NonPositiveInsetLeavesPose_Negative)
   EXPECT_FLOAT_EQ(out.y, mid.y);
 }
 
+TEST(SampleGridAtWorld, ReturnsCellValue_Positive)
+{
+  auto grid = makeTestGrid();
+  // makeTestGrid: 20x20 at 0.05m, origin 0,0.
+  grid.data[1 * 20 + 2] = 42;
+  const double x = 2 * 0.05 + 0.01;  // col 2
+  const double y = 1 * 0.05 + 0.01;  // row 1
+  const auto v = explorer_mission::sampleGridAtWorld(grid, x, y);
+  ASSERT_TRUE(v.has_value());
+  EXPECT_EQ(*v, 42);
+}
+
+TEST(SampleGridAtWorld, OffMapReturnsNullopt_Negative)
+{
+  const auto grid = makeTestGrid();
+  const auto v = explorer_mission::sampleGridAtWorld(grid, -1.0, -1.0);
+  EXPECT_FALSE(v.has_value());
+}
+
 int main(int argc, char ** argv)
 {
   ::testing::InitGoogleTest(&argc, argv);

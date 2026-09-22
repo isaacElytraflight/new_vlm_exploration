@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #include <geometry_msgs/msg/point.hpp>
@@ -60,6 +61,13 @@ cv::Point2f insetFrontierGoalWorld(
   double inset_m);
 
 double euclideanDist(const cv::Point2f & a, const cv::Point2f & b);
+
+/// Sample a single OccupancyGrid cell at a world pose (map frame).
+/// nullopt when the pose is off-map or the grid is empty / invalid.
+std::optional<int8_t> sampleGridAtWorld(
+  const nav_msgs::msg::OccupancyGrid & grid,
+  double x_m,
+  double y_m);
 
 /// Drop later contours whose midpoint is within radius_m of an earlier kept midpoint.
 std::vector<std::vector<cv::Point>> dedupeContoursByMidpoint(

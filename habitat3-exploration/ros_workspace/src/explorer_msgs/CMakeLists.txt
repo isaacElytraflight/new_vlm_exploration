@@ -23,6 +23,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/BrainDecisionEvent.msg"
   "msg/BrainGraphEdges.msg"
   "msg/VlmChoiceEvent.msg"
+  "msg/NavFailEvent.msg"
   "action/DiscreteMove.action"
   "action/RateFrontierOpenness.action"
   "action/PerceiveAndCapture.action"

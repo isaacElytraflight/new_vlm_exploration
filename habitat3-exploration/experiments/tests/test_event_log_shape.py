@@ -16,6 +16,7 @@ from experiments.event_shapes import (  # noqa: E402
     action_name_from_brain_action,
     compact_brain_decision_event,
     compact_graph_edges_event,
+    compact_nav_fail_event,
     compact_scores_event,
     compact_status_event,
     compact_vlm_choice_event,
@@ -56,13 +57,51 @@ def test_brain_decision_includes_brain_and_visited_positive():
         detail="greedy nearest euclidean",
         visited_ids=[1],
         live_ids=[2, 3],
+        robot_x=0.5,
+        robot_y=-0.25,
+        goal_distance_m=1.030776,
     )
     assert ev["topic"] == "exploration/brain/decision"
     assert ev["brain_id"] == "greedy_nearest"
     assert ev["action"] == "navigate"
     assert ev["visited_ids"] == [1]
     assert ev["live_ids"] == [2, 3]
+    assert ev["robot_x"] == 0.5
+    assert ev["goal_distance_m"] == pytest.approx(1.030776)
     assert "image" not in ev
+
+
+def test_nav_fail_event_includes_clearance_and_codes_positive():
+    ev = compact_nav_fail_event(
+        stage="classified",
+        fail_class="stuck",
+        goal_id=7,
+        nav_error_code=208,
+        new_plan_code=208,
+        start_clearance_m=0.18,
+        start_clearance_ok=False,
+        grid_occ_at_robot=0,
+        grid_occ_at_goal=100,
+        costmap_at_robot=254,
+        costmap_at_goal=254,
+    )
+    assert ev["topic"] == "exploration/nav_fail"
+    assert ev["stage"] == "classified"
+    assert ev["fail_class"] == "stuck"
+    assert ev["start_clearance_m"] == pytest.approx(0.18)
+    assert ev["costmap_at_robot"] == 254
+    assert "image" not in ev
+
+
+def test_nav_fail_event_truncates_error_strings_negative():
+    ev = compact_nav_fail_event(
+        stage="resolved",
+        resolution="mark_dead",
+        nav_error="e" * 500,
+        new_plan_err="p" * 500,
+    )
+    assert len(ev["nav_error"]) == 240
+    assert len(ev["new_plan_err"]) == 240
 
 
 def test_brain_decision_detail_truncated_negative():

@@ -2,7 +2,8 @@
 """Text-only ROS event logger for ablation run packages.
 
 Writes JSONL (optionally gzip) for exploration/status, frontier_tree,
-vlm/scores, brain/decision, brain/graph_edges, and vlm/choice — never images.
+vlm/scores, brain/decision, nav_fail, brain/graph_edges, and vlm/choice —
+never images.
 
 Schema helpers for offline tests live in experiments/event_shapes.py (host);
 this script stays self-contained for the container (/workspace/scripts only).
@@ -29,6 +30,11 @@ from explorer_msgs.msg import (
 )
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+
+try:
+    from explorer_msgs.msg import NavFailEvent
+except ImportError:  # pragma: no cover - older install without NavFailEvent
+    NavFailEvent = None  # type: ignore[misc, assignment]
 
 
 def utc_now_iso() -> str:
@@ -79,6 +85,14 @@ class EventLogger(Node):
         self.create_subscription(
             BrainDecisionEvent, "exploration/brain/decision", self._brain_decision_cb, status_qos
         )
+        if NavFailEvent is not None:
+            self.create_subscription(
+                NavFailEvent, "exploration/nav_fail", self._nav_fail_cb, status_qos
+            )
+        else:
+            self.get_logger().warn(
+                "NavFailEvent unavailable; skipping exploration/nav_fail logging"
+            )
         self.create_subscription(
             BrainGraphEdges, "exploration/brain/graph_edges", self._graph_edges_cb, status_qos
         )
@@ -167,6 +181,40 @@ class EventLogger(Node):
                 "detail": str(msg.detail)[:240],
                 "visited_ids": [int(i) for i in msg.visited_ids],
                 "live_ids": [int(i) for i in msg.live_ids],
+                "robot_x": float(msg.robot_x),
+                "robot_y": float(msg.robot_y),
+                "goal_distance_m": float(msg.goal_distance_m),
+            },
+        )
+
+    def _nav_fail_cb(self, msg: NavFailEvent) -> None:
+        self._emit(
+            "exploration/nav_fail",
+            {
+                "stage": str(msg.stage)[:32],
+                "fail_class": str(msg.fail_class)[:32],
+                "resolution": str(msg.resolution)[:64],
+                "goal_id": int(msg.goal_id),
+                "goal_x": float(msg.goal_x),
+                "goal_y": float(msg.goal_y),
+                "prior_id": int(msg.prior_id),
+                "robot_x": float(msg.robot_x),
+                "robot_y": float(msg.robot_y),
+                "nav_dt_s": float(msg.nav_dt_s),
+                "nav_error_code": int(msg.nav_error_code),
+                "nav_error": str(msg.nav_error)[:240],
+                "prior_pose_known": bool(msg.prior_pose_known),
+                "prior_plan_ok": bool(msg.prior_plan_ok),
+                "new_goal_plan_ok": bool(msg.new_goal_plan_ok),
+                "new_plan_code": int(msg.new_plan_code),
+                "new_plan_err": str(msg.new_plan_err)[:240],
+                "definitive_unreachable": bool(msg.definitive_unreachable),
+                "start_clearance_m": float(msg.start_clearance_m),
+                "start_clearance_ok": bool(msg.start_clearance_ok),
+                "grid_occ_at_robot": int(msg.grid_occ_at_robot),
+                "grid_occ_at_goal": int(msg.grid_occ_at_goal),
+                "costmap_at_robot": int(msg.costmap_at_robot),
+                "costmap_at_goal": int(msg.costmap_at_goal),
             },
         )
 
