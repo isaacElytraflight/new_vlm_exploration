@@ -78,6 +78,23 @@ bool shouldAcceptBrainComplete(bool start_clearance_ok);
 /// (Ablation seed0: nearPose short-circuit + terminate left 17 live frontiers.)
 bool shouldTerminateAfterReturnToPriorFailed(bool have_alternate_sanctuary);
 
+/// Map-frame XY used by stuck-recovery retreat targeting.
+struct Pose2d
+{
+  double x{0.0};
+  double y{0.0};
+};
+
+/// Default physical backtrack when a NEW frontier nav fails as stuck.
+/// Long enough to leave a wedged pose; short enough to avoid crossing the room
+/// back to the previous frontier.
+constexpr double kDefaultStuckRetreatM = 1.0;
+
+/// Point at most `max_retreat_m` from `stuck` toward `prior`.
+/// If `prior` is already inside that budget, returns `prior`.
+/// Non-positive or non-finite budget, or coincident poses, returns `stuck`.
+Pose2d shortRetreatTarget(Pose2d stuck, Pose2d prior, double max_retreat_m);
+
 /// How an exploration episode ended (logged + collected into run metrics).
 enum class TerminationReason : uint8_t
 {

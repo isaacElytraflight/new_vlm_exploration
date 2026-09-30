@@ -121,4 +121,19 @@ TerminationReason terminationReasonFromString(const std::string & s)
   return TerminationReason::kUnknown;
 }
 
+Pose2d shortRetreatTarget(Pose2d stuck, Pose2d prior, double max_retreat_m)
+{
+  if (!(max_retreat_m > 0.0) || !std::isfinite(max_retreat_m)) {
+    return stuck;
+  }
+  const double dx = prior.x - stuck.x;
+  const double dy = prior.y - stuck.y;
+  const double dist = std::hypot(dx, dy);
+  if (!(dist > 0.0) || !std::isfinite(dist) || dist <= max_retreat_m) {
+    return (dist > 0.0 && std::isfinite(dist)) ? prior : stuck;
+  }
+  const double scale = max_retreat_m / dist;
+  return Pose2d{stuck.x + dx * scale, stuck.y + dy * scale};
+}
+
 }  // namespace explorer_mission

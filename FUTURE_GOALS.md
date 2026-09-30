@@ -14,7 +14,7 @@ Contract reference: [habitat3-exploration/ros_workspace/design_doc.md](habitat3-
 
 ---
 
-## Current baseline (as of 2026-09-15)
+## Current baseline (as of 2026-09-30)
 
 ```text
 /depth_data + /camera_info + /odom
@@ -23,11 +23,11 @@ Contract reference: [habitat3-exploration/ros_workspace/design_doc.md](habitat3-
               → ExplorationBrain plugin (brain_id)
               → detect frontiers (inset into free) → brain → optional VLM → selectNextGoal
               → 360° scan only on first visit to a frontier (visited ≠ dead)
-        → Nav2 NavigateToPose  →  /cmd_vel  →  DiscreteMove (Habitat)
+        → discrete lattice A* on /grid_map  →  DiscreteMove (Habitat)
         → on NEW-goal nav fail: nav_fail_policy
-              inaccessible (prior OK + start clear + definitive NO_VALID_PATH/…) → mark dead
-              else stuck → thrash → zero-inflation return → retry once;
-              still wedged → termination_reason=stuck (do not burn remaining tree)
+              inaccessible (prior OK + start clear + definitive no-path) → mark dead
+              else stuck → wall thrash → retreat ≤ stuck_retreat_m (default 1 m)
+              toward the previous scan pose → retry once
 ```
 
 | Piece | Location | Notes |
@@ -36,23 +36,21 @@ Contract reference: [habitat3-exploration/ros_workspace/design_doc.md](habitat3-
 | Exploration | `explore_node` + `ExplorationBrain` | Pluggable brains via `brain_id`; detect/Nav2/recovery stay in node |
 | Brains | `exploration_brain.hpp/.cpp` | `vlm_tree_dfs`, `greedy_nearest`, `vlm_frontier_graph`, `vlm_choice_dijkstra` |
 | Visited vs dead | Tree + graph brains | `visited` = arrived (one-time 360°); `dead` / `fully_explored` = abandoned |
-| Motion | `cmd_vel_to_discrete` | `turn_over_drive_ratio` default **0.5** + `drive_max_angular` **0.12** (corner arcs TURN, not 0.25 m FORWARD) |
-| Nav2 | `nav2_params.yaml` | No-recovery BT; `allow_unknown: true`; costmap inflation **0.22 m** (≥ `robot_radius` 0.18) |
+| Motion | `planOnOccupancy` → `/movement/discrete_move` | Default `navigation_mode:=discrete`. F/B 0.25 m, turn ±10°. Nav2 + `cmd_vel_to_discrete` only if `navigation_mode:=nav2` |
+| Stuck retreat | `shortRetreatTarget` | After wall thrash, move at most `stuck_retreat_m` (1.0 m) toward the previous scan pose |
 | Nav fail | `nav_fail_policy` | Inaccessible vs stuck; honest `termination_reason` in status / metrics |
 | Ablations | `experiments/` + Elytra | Brain checkboxes; Fresh → `ablation_run_<ts>/`; cells `{algo}_seedN/` + `run_info.json` |
 | Event JSONL | `experiment_event_logger.py` | status, tree, vlm/scores, **brain/decision**, **brain/graph_edges**, **vlm/choice** |
 
 ### Known serious issues (not resolved)
 
-Ablation metrics remain **unreliable for claiming navigation quality**. Treat high coverage as suspicious until path follow + recovery are re-verified end-to-end.
+Room-scale discrete navigation is shown (`ablation_run_20260930_140918`). These are still open:
 
-1. **DiscreteMove path follow still imperfect.** Nav2 plans around corners; RPP→`cmd_vel`→0.25 m / 10° quantization still wedges the robot into walls. Ratio/heading gate (0.5 / 0.12) helps mild arcs; residual plow/thrash remains in smokes (`termination_reason=stuck` ~50–77% cov).
-2. **“Advanced” recovery can look worse than naive mark-dead.** Ending `stuck` after one failed return avoids mass-blacklist lies, but also stops episodes that older thrash-forever runs sometimes recovered into higher coverage. Persistence ≠ correctness.
-3. **Fake early “success” hazard.** Prior classifier bugs (prior still plannable while wedged; soft-fail score 0; apply-profile abort) produced `success` / `no live frontiers` in seconds at ~52% with almost no visits. Prefer `termination_reason`, visited counts, and trajectory media over status alone.
-4. **Costmap / start clearance sensitivity.** Inflation vs `robot_radius`, frontier goals on free↔unknown edges, and Habitat `collided=True` during DiscreteMove interact; wedged starts make every NEW goal look like `NO_VALID_PATH`.
-5. **Goal C debt unchanged:** graph edges are Euclidean kNN, not Nav2 path cost; choice brain is score-argmax stand-in, not true multi-image VLM choice.
+1. **Final pose can still be wedged after the room is mapped.** Seed 0 of that run mapped the same 75.0 / 84.1 m² as seed 1, then ended `termination_reason=stuck` (“wedged with no reachable live frontiers”). Seed 1 ended `success`.
+2. **Fake early “success” hazard.** Older classifier bugs produced `success` in seconds at ~52% with almost no visits. Prefer `termination_reason`, mapped area, and trajectory over status alone.
+3. **Goal C debt unchanged:** graph edges are Euclidean kNN, not path cost; choice brain is score-argmax stand-in, not true multi-image VLM choice.
 
-**Open priority:** discrete lattice nav is now the default (`discrete-lattice-nav` branch). Re-verify corner follow visually; only then revisit recovery aggressiveness.
+**Open priority:** run the VLM tree brain on this same discrete path. The Nav2→`cmd_vel` quantization wedge is no longer the default.
 
 ---
 
@@ -67,6 +65,7 @@ Ablation metrics remain **unreliable for claiming navigation quality**. Treat hi
 | **B2.1 — Campaign ops + thrash recovery** | 2026-09-07 | Fresh vs resume UI; per-run scratch; interrupt cleanup; tmux retries; return-home abandon; thrash BACK/FWD×growing (max 5) |
 | **C — Swappable brains (code path)** | 2026-09-08 | Interface + 4 brains + thin explore_node + ablation `brain` wiring + event logging; **smoke campaign not yet run** |
 | **C polish — ops / scan / recovery** | 2026-09-08 | Brain enable checkboxes; visited≠dead scan gate; zero-inflation last-ditch; `ablation_run_<ts>/{algo}_seedN` naming |
+| **Discrete lattice + short retreat** | 2026-09-30 | Lattice A* is the default path. Stuck recovery retreats ≤ 1 m. Greedy seeds on `JmbYfDe2QKZ` both mapped 89.2% (`ablation_run_20260930_140918`) |
 
 ---
 

@@ -122,10 +122,11 @@ to “free” (`free_near_eps`). That hid real far walls and did not stop floor 
 
 - **Default:** `navigation_mode:=discrete` — lattice A* in DiscreteMove space (F/B 0.25 m, turn ±10°) on `/grid_map` with soft footprint inflation, then `/movement/discrete_move`. Nav2 is not started.
 - **Optional legacy:** `navigation_mode:=nav2` — NavigateToPose + `cmd_vel_to_discrete` quantization (not recommended for hexapod transfer).
-- **Fail policy:** `nav_fail_policy` still classifies inaccessible vs stuck using discrete path-exists checks in discrete mode.
+- **Fail policy:** `nav_fail_policy` classifies inaccessible vs stuck using discrete path-exists checks in discrete mode.
+- **Stuck retreat:** after wall thrash, navigate at most `stuck_retreat_m` (default 1.0 m) toward the previous scan pose. A full return across the room was a debugging sanctuary. DFS parent hops stay theoretical (no motion). Arrival tolerance for the hop is at most 0.40 m so the 1 m goal-accept radius does not treat it as already done.
 - **Geometric helper:** obstacle-unaware `planToPose` remains for unit tests only.
 
-**Verify:** rebuild `explorer_mission`, run greedy stress with discrete mode. Do not treat ablation coverage alone as proof of nav health until corner follow is visually sane.
+**Milestone (2026-09-30, `ablation_run_20260930_140918`):** `greedy_nearest` on `JmbYfDe2QKZ`, both seeds mapped 75.0 / 84.1 m² (89.2%). Seed 1 finished `success` (65.9 m, 109 s). Seed 0 traveled 88.1 m in 151 s and ended `stuck` only because the final pose was wedged after that same map. See [ADR-001](../../../docs/decisions/001-short-stuck-retreat.md).
 
 ### Exploration loop (frontier tree)
 

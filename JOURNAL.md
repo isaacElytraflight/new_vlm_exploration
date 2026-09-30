@@ -6,6 +6,41 @@ Add a new dated section at the top when you work on this repo.
 
 ---
 
+## 2026-09-30 — Milestone: discrete nav traverses the room
+
+**Evidence (`ablation_run_20260930_140918`, scene `JmbYfDe2QKZ`, `greedy_nearest`, reveal 5 m):**
+
+| Seed | Result | Mapped | Path | Time | Unstick / backtrack | Recovered |
+|------|--------|--------|------|------|---------------------|-----------|
+| 0 | `termination_reason=stuck` — wedged, no reachable live frontiers | 75.0 / 84.1 m² (89.2%) | 88.1 m | 151 s | 5 / 5 | 2 |
+| 1 | `termination_reason=success` — no live frontiers | 75.0 / 84.1 m² (89.2%) | 65.9 m | 109 s | 2 / 3 | 2 |
+
+Both seeds reached the same mapped area this scene has hit on earlier real successes. Short retreats (~1 m, not a return across the room) ran and some recoveries completed. Seed 0 still ends `stuck` because the final pose was wedged after the map was exhausted; the coverage matches seed 1’s clean finish.
+
+**Also fixed before that campaign could start:** `ablation_run_20260930_140134` created empty run dirs. `start_sim.sh` was CRLF, so bash died on `set -eo pipefail` and the tmux session vanished (`new_session_rc=0 has_session_rc=1`). `.gitattributes` keeps `*.sh` as LF.
+
+---
+
+## 2026-09-30 — Short stuck-recovery retreat (~1 m)
+
+**Symptom:** After a NEW-frontier nav failure classified as stuck, the backtracking stage navigated all the way to the previous scan pose (often 5+ m across the room). That full return was a debugging sanctuary, not something the discrete lattice planner still needs.
+
+**Change:** After wall thrash, retreat at most `stuck_retreat_m` (default 1.0 m) toward the previous frontier. If that pose is already closer than the budget, go there. Arrival tolerance for the hop is `min(discrete_goal_tol_m, 0.40)` so the 1 m goal-accept radius does not treat the retreat as already done. DFS parent hops stay theoretical (no motion). If the short hop fails, the existing alternate-scan-pose fallback is unchanged.
+
+**Not changed:** Theoretical DFS backtrack still adopts the parent in place.
+
+---
+
+## 2026-09-30 — Ablation batch created empty runs
+
+**Evidence (`ablation_run_20260930_140134`):** Both seeds `status=error` in ~15s, no logs/media. `failed to start episode tmux session after retries: new_session_rc=0 has_session_rc=1`.
+
+**Root cause:** `sim/scripts/start_sim.sh` was CRLF in the Windows worktree (`core.autocrlf=true`). The container bind-mounts that file. Bash exits on line 4: `set: pipefail\r: invalid option name`, so the tmux session disappears before `has-session`.
+
+**Fix:** Convert `start_sim.sh` to LF. `.gitattributes` sets `*.sh text eol=lf` so checkout does not put CR back.
+
+---
+
 ## 2026-09-21 — Discrete lattice navigation (stop quantizing Nav2)
 
 **Branch:** `discrete-lattice-nav`

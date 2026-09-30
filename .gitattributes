@@ -1,0 +1,4 @@
+# Shell scripts are bind-mounted into the Linux sim container.
+# core.autocrlf=true would check them out as CRLF and bash dies on
+# `set -o pipefail` (the option name becomes `pipefail\r`).
+*.sh text eol=lf

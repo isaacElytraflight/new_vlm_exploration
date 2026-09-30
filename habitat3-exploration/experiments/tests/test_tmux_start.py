@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from experiments.orchestrator import build_tmux_episode_start_cmd, tmux_start_looks_ok
+
+START_SIM = Path(__file__).resolve().parents[2] / "sim" / "scripts" / "start_sim.sh"
+
+
+def shell_script_has_unix_newlines(data: bytes) -> bool:
+    """Bash rejects `set -o pipefail` when the script was checked out CRLF."""
+    return b"\r" not in data
 
 
 def test_harness_positive_control():
@@ -39,6 +48,16 @@ def test_tmux_start_ok_when_session_exists_positive():
 
 def test_tmux_start_fails_when_server_exited_negative():
     assert tmux_start_looks_ok(new_session_rc=1, has_session_rc=1) is False
+
+
+def test_start_sim_script_is_unix_newlines_positive():
+    data = START_SIM.read_bytes()
+    assert shell_script_has_unix_newlines(data)
+    assert b"set -eo pipefail\n" in data
+
+
+def test_crlf_pipefail_line_is_not_unix_newlines_negative():
+    assert shell_script_has_unix_newlines(b"set -eo pipefail\r\n") is False
 
 
 def test_tmux_start_fails_when_new_ok_but_session_missing_negative():

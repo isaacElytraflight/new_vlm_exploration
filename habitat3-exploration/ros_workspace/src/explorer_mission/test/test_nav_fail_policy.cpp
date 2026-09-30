@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <limits>
 
 #include "explorer_mission/nav_fail_policy.hpp"
@@ -22,6 +23,9 @@ using explorer_mission::shouldMarkDeadAfterStuckRecovery;
 using explorer_mission::shouldSoftSkipWedgedGoal;
 using explorer_mission::shouldAcceptBrainComplete;
 using explorer_mission::kMaxWedgedKeepLivePerGoal;
+using explorer_mission::Pose2d;
+using explorer_mission::kDefaultStuckRetreatM;
+using explorer_mission::shortRetreatTarget;
 
 TEST(NavFailPolicyHarness, RunnerExecutesAssertions)
 {
@@ -176,6 +180,56 @@ TEST(TerminationReason, RoundTripStrings_Positive)
 TEST(TerminationReason, UnknownString_Negative)
 {
   EXPECT_EQ(terminationReasonFromString("nope"), TerminationReason::kUnknown);
+}
+
+TEST(StuckRetreat, StopsAboutOneMeterShortOfDistantPrior_Positive)
+{
+  const auto stuck = Pose2d{0.0, 0.0};
+  const auto prior = Pose2d{6.0, 0.0};
+  const auto target = shortRetreatTarget(stuck, prior, kDefaultStuckRetreatM);
+  const double moved = std::hypot(target.x - stuck.x, target.y - stuck.y);
+  const double remaining = std::hypot(prior.x - target.x, prior.y - target.y);
+  EXPECT_NEAR(moved, 1.0, 1e-6);
+  EXPECT_NEAR(remaining, 5.0, 1e-6);
+  EXPECT_NEAR(target.y, 0.0, 1e-6);
+}
+
+TEST(StuckRetreat, GoesAllTheWayWhenPriorIsAlreadyWithinAMeter_Positive)
+{
+  const auto stuck = Pose2d{1.0, 2.0};
+  const auto prior = Pose2d{1.0, 2.6};
+  const auto target = shortRetreatTarget(stuck, prior, kDefaultStuckRetreatM);
+  EXPECT_NEAR(target.x, prior.x, 1e-6);
+  EXPECT_NEAR(target.y, prior.y, 1e-6);
+}
+
+TEST(StuckRetreat, DiagonalRetreatStaysOnSegment_Positive)
+{
+  const auto stuck = Pose2d{0.0, 0.0};
+  const auto prior = Pose2d{3.0, 4.0};  // 5 m away
+  const auto target = shortRetreatTarget(stuck, prior, 1.0);
+  EXPECT_NEAR(std::hypot(target.x, target.y), 1.0, 1e-6);
+  EXPECT_NEAR(target.x / 3.0, target.y / 4.0, 1e-6);
+}
+
+TEST(StuckRetreat, NonPositiveBudgetDoesNotMove_Negative)
+{
+  const auto stuck = Pose2d{2.0, -1.0};
+  const auto prior = Pose2d{8.0, 4.0};
+  const auto zero = shortRetreatTarget(stuck, prior, 0.0);
+  const auto neg = shortRetreatTarget(stuck, prior, -1.0);
+  EXPECT_NEAR(zero.x, stuck.x, 1e-9);
+  EXPECT_NEAR(zero.y, stuck.y, 1e-9);
+  EXPECT_NEAR(neg.x, stuck.x, 1e-9);
+  EXPECT_NEAR(neg.y, stuck.y, 1e-9);
+}
+
+TEST(StuckRetreat, IdenticalPosesStayPut_Negative)
+{
+  const auto stuck = Pose2d{-3.5, 1.25};
+  const auto target = shortRetreatTarget(stuck, stuck, kDefaultStuckRetreatM);
+  EXPECT_NEAR(target.x, stuck.x, 1e-9);
+  EXPECT_NEAR(target.y, stuck.y, 1e-9);
 }
 
 TEST(NavFailPolicy, FailClassCStr_Positive)

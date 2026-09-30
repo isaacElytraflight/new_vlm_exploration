@@ -84,6 +84,8 @@ public:
     unstick_max_steps_ = declare_parameter<int>("unstick_max_steps", 8);
     unstick_max_attempts_ = declare_parameter<int>(
       "unstick_max_attempts", explorer_mission::kDefaultMaxUnstickAttempts);
+    stuck_retreat_m_ = declare_parameter<double>(
+      "stuck_retreat_m", explorer_mission::kDefaultStuckRetreatM);
     nav2_inflation_radius_m_ = declare_parameter<double>("nav2_inflation_radius_m", 0.22);
     mapper_inflation_m_ = declare_parameter<double>("mapper_inflation_m", mapper_inflation_m_);
 
@@ -1234,7 +1236,7 @@ private:
     RCLCPP_WARN(
       get_logger(),
       "NEW frontier nav fail not definitive inaccessible — treating as stuck "
-      "(will thrash then deflate-return)");
+      "(will thrash then short retreat)");
 
     publishPhase(
       "unsticking", statusNodeId(), prior_id, false,
@@ -1243,15 +1245,36 @@ private:
       runWallUnstick(i);
     }
 
+    updateRobotPoseFromTf();
+    const auto retreat = explorer_mission::shortRetreatTarget(
+      explorer_mission::Pose2d{current_pos_.x, current_pos_.y},
+      explorer_mission::Pose2d{prior_pose.x, prior_pose.y},
+      stuck_retreat_m_);
+    const cv::Point2f retreat_pose(
+      static_cast<float>(retreat.x), static_cast<float>(retreat.y));
+    const double prior_dist_m = std::hypot(
+      static_cast<double>(current_pos_.x) - prior_pose.x,
+      static_cast<double>(current_pos_.y) - prior_pose.y);
+    const double retreat_dist_m = std::hypot(
+      static_cast<double>(current_pos_.x) - retreat_pose.x,
+      static_cast<double>(current_pos_.y) - retreat_pose.y);
+    RCLCPP_WARN(
+      get_logger(),
+      "Stuck recovery retreat %.2f m toward prior %u (prior is %.2f m away) "
+      "-> (%.2f, %.2f)",
+      retreat_dist_m, prior_id, prior_dist_m, retreat_pose.x, retreat_pose.y);
     publishPhase(
       "backtracking", statusNodeId(), prior_id, false,
-      "stuck recovery: deflate + return to previous");
+      "stuck recovery: short retreat, not full return to previous frontier");
     applyCostmapInflation(0.0, 0.0);
-    bool back_ok = navigateToPosition(prior_pose, prior_pose);
+    // goal_accept_radius defaults to 1 m, which would treat a 1 m retreat as
+    // already arrived. Require the robot to actually reach the retreat pose.
+    const double retreat_accept_m = std::min(discrete_goal_tol_m_, 0.40);
+    bool back_ok = navigateToPosition(retreat_pose, retreat_pose, retreat_accept_m);
     if (!back_ok) {
       for (int i = 0; i < unstick_max_attempts_ && !back_ok; ++i) {
         runWallUnstick(i);
-        back_ok = navigateToPosition(prior_pose, prior_pose);
+        back_ok = navigateToPosition(retreat_pose, retreat_pose, retreat_accept_m);
       }
     }
     // Prefer any other visited scan pose over ending the episode.
@@ -1262,7 +1285,10 @@ private:
     updateRobotPoseFromTf();
     // nearPose alone is not a successful return if still wedged — that short-circuit
     // caused seed0 to "return", retry the bad NEW goal, then terminate_stuck.
-    if (!back_ok && nearPose(prior_pose) &&
+    if (!back_ok &&
+      std::hypot(
+        static_cast<double>(current_pos_.x - retreat_pose.x),
+        static_cast<double>(current_pos_.y - retreat_pose.y)) <= retreat_accept_m &&
       explorer_mission::isStartClearanceOk(
         currentClearanceM(), unstick_min_clearance_m_))
     {
@@ -1298,8 +1324,9 @@ private:
 
     RCLCPP_INFO(
       get_logger(),
-      "Returned to prior %u; retrying NEW frontier with normal inflation",
-      prior_id);
+      "Short retreat done (%.2f m, prior %u was %.2f m away); "
+      "retrying NEW frontier with normal inflation",
+      retreat_dist_m, prior_id, prior_dist_m);
     if (navigateToPosition(goal_pos, look_at)) {
       publishNavFailEvent(
         "resolved", fail_class_s, "recovered",
@@ -1507,24 +1534,30 @@ private:
     }
   }
 
-  bool navigateToPosition(const cv::Point2f & goal_pos, const cv::Point2f & look_at)
+  bool navigateToPosition(
+    const cv::Point2f & goal_pos,
+    const cv::Point2f & look_at,
+    double accept_radius_m = -1.0)
   {
     const double dx = look_at.x - current_pos_.x;
     const double dy = look_at.y - current_pos_.y;
     const double goal_yaw_deg = std::atan2(dy, dx) * 180.0 / M_PI;
-    return navigateToGoal(goal_pos.x, goal_pos.y, goal_yaw_deg);
+    return navigateToGoal(goal_pos.x, goal_pos.y, goal_yaw_deg, accept_radius_m);
   }
 
-  bool navigateToGoal(double goal_x, double goal_y, double goal_yaw_deg)
+  bool navigateToGoal(
+    double goal_x, double goal_y, double goal_yaw_deg, double accept_radius_m = -1.0)
   {
     updateRobotPoseFromTf();
+    const double accept_m =
+      accept_radius_m >= 0.0 ? accept_radius_m : goal_accept_radius_m_;
     // Short-circuit before calling Nav2: goals at/near current pose (esp. return-home
     // to the scan node we never left) otherwise send NavigateToPose to self and fail.
-    if (goal_accept_radius_m_ > 0.0) {
+    if (accept_m > 0.0) {
       const double dist_m = std::hypot(
         static_cast<double>(current_pos_.x) - goal_x,
         static_cast<double>(current_pos_.y) - goal_y);
-      if (dist_m <= goal_accept_radius_m_) {
+      if (dist_m <= accept_m) {
         return true;
       }
     }
@@ -1543,7 +1576,7 @@ private:
             explorer_mission::kNavStuckTimeoutS);
           return true;
         },
-        goal_accept_radius_m_);
+        accept_m);
       if (!ok) {
         RCLCPP_WARN(
           get_logger(), "Nav2 navigation failed: %s",
@@ -1632,6 +1665,7 @@ private:
   int early_nav_min_score_{3};
   int return_home_max_attempts_{20};
   double unstick_min_clearance_m_{0.25};
+  double stuck_retreat_m_{explorer_mission::kDefaultStuckRetreatM};
   int unstick_max_steps_{8};
   int unstick_max_attempts_{explorer_mission::kDefaultMaxUnstickAttempts};
   /// Nominal inflation restored after last-ditch zero-inflation retry.
